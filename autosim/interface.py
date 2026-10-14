@@ -550,24 +550,28 @@ class OperatorInterface:
 
     def _draw_detailed_status(self, session: ScenarioSession) -> None:
         rows = actions.DETAILED_STATUS_ROWS
-        box = self._overlay_box(0.24, len(rows) // 1 + 3, "status")
-        box.height = min(box.height, int(self.screen.get_height() * 0.62))
+        box = self._overlay_box(0.24, 1, "status")
+        line_height = self.fonts["small"].get_height() + 3
+        box.height = min(len(rows) * line_height + self.fonts["title"].get_height() + 30,
+                         int(self.screen.get_height() * 0.62))
 
         def close() -> None:
             self.open_dialog = None
         content = self._dialog_frame(box, "Detailed status", close)
         line = self.fonts["small"].get_height() + 3
         values = session.status_values
-        column_width = content.width // 2
         per_column = max(1, (content.height - 4) // line)
+        columns = math.ceil(len(rows) / per_column)
+        column_width = content.width // columns
+        label_width = max(self.fonts["small"].size(label + ":")[0] for _, label, _ in rows) + 10
         for index, (key, label, unit) in enumerate(rows):
             column, row = index // per_column, index % per_column
             x = content.x + column * column_width
             y = content.y + row * line
             value = values.get(key, "")
             self._blit_text(label + ":", "small", C["text"], (x, y))
-            self._blit_text(self._format(value) + unit, "small", self._value_color(key, value),
-                            (x + int(column_width * 0.55), y))
+            text = self._fit_text(self._format(value) + unit, "small", column_width - label_width - 4)
+            self._blit_text(text, "small", self._value_color(key, value), (x + label_width, y))
 
     def _draw_notification_list(self, session: ScenarioSession) -> None:
         box = self._overlay_box(0.30, min(10, len(session.notifications)) + 2, "alerts")
@@ -645,13 +649,14 @@ class OperatorInterface:
             "normal": ("button", "button_hover"),
             "link": ("panel", "button_hover"),
             "danger": ("button_danger", "button_danger_hover"),
+            "estop": ("button_danger", "button_danger_hover"),
             "primary": ("button_primary", "button_primary_hover"),
             "toggled": ("button_toggled", "button_toggled"),
             "yes": ("button_yes", "button_yes"),
             "no": ("button_no", "button_no"),
         }.get(style, ("button", "button_hover"))
         color = C[colors[1] if hover else colors[0]] if enabled else C["button_disabled"]
-        if style == "danger":
+        if style == "estop":    # the big oval emergency-stop button
             pygame.draw.ellipse(self.screen, color, rect)
             pygame.draw.ellipse(self.screen, C["panel_border"], rect, 2)
         else:
@@ -699,7 +704,7 @@ class OperatorInterface:
         return lines
 
     def _fit_text(self, text: str, font: str, width: int) -> str:
-        if self.fonts[font].size(text)[0] <= width:
+        if self.fonts[font].size(text)[0] <= width or len(text) <= 2:
             return text
         while text and self.fonts[font].size(text + "...")[0] > width:
             text = text[:-1]

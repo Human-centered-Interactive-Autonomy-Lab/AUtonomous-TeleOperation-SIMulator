@@ -237,6 +237,9 @@ class Actor:
     def get_transform(self):
         return self.transform
 
+    def set_transform(self, transform):
+        self.transform = transform
+
     def get_velocity(self):
         forward = self.transform.get_forward_vector()
         return Vector3D(forward.x * self.speed, forward.y * self.speed, 0)

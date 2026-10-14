@@ -143,6 +143,7 @@ class CarlaSimulation(Simulation):
         self.ignored_obstacles: set = set()
         self.spawned: List[Any] = []                # everything we must destroy
         self.scene_actor_ids: set = set()           # props/vehicles placed by the scene or tasks
+        self.actor_names: Dict[int, str] = {}       # actor id -> name from the scene file
         self.walker_targets: Dict[int, Tuple[Any, float]] = {}   # walker id -> (target location, speed)
         self.cameras: Dict[str, Any] = {}
         self._frames: Dict[str, Tuple[float, Any]] = {}
@@ -196,6 +197,7 @@ class CarlaSimulation(Simulation):
         self.ignored_obstacles = set()
         self.walker_targets = {}
         self.scene_actor_ids = set()
+        self.actor_names = {}
         self._yielding = False
         self.lane_return_at_m = None
         self.route_finishing = False
@@ -310,7 +312,8 @@ class CarlaSimulation(Simulation):
         if self._tick_count % OBSTACLE_CHECK_EVERY_TICKS == 0:
             blocking, walker_in_path = self._scan_path()
             if blocking is not None:
-                self.soft_stop("Obstacle detected ahead: {}".format(_describe(blocking)))
+                name = self.actor_names.get(blocking.id) or _describe(blocking)
+                self.soft_stop("Obstacle detected ahead: {}".format(name))
                 return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
             self._yielding = walker_in_path
         if self._yielding:
@@ -682,6 +685,7 @@ class CarlaSimulation(Simulation):
             return None
         self.spawned.append(actor)
         self.scene_actor_ids.add(actor.id)
+        self.actor_names[actor.id] = spec.name
         if spec.is_vehicle:
             actor.set_simulate_physics(True)
             light_value = 0

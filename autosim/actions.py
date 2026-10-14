@@ -18,7 +18,8 @@ Groups (where the button is drawn):
     "map"           tool buttons on the Map panel
     "status"        button at the bottom of the Status panel
 
-Styles: "normal", "danger" (red), "primary" (orange), "link" (text-like).
+Styles: "normal", "danger" (red), "estop" (red oval), "primary" (orange),
+        "link" (text-like).
 Kinds:  "click" (default), "toggle" (shows on/off), "hold" (push-to-talk:
         handler runs on press, ``release`` handler on release).
 """
@@ -224,7 +225,7 @@ ACTIONS: List[Action] = [
     Action("return_to_depot", "Return to depot after this job", "actions", _return_to_depot, "link",
            kind="toggle", is_on=lambda s: s.return_to_depot),
     # --- driving (Actions panel, right) -------------------------------------
-    Action("emergency_stop", "E-STOP", "drive", _emergency_stop, "danger"),
+    Action("emergency_stop", "E-STOP", "drive", _emergency_stop, "estop"),
     Action("pull_over", "Pull Over", "drive", _pull_over, "primary"),
     Action("manual_control", "Manual Control", "drive", _manual_control, "primary", kind="toggle",
            is_on=lambda s: s.manual_control_active),
