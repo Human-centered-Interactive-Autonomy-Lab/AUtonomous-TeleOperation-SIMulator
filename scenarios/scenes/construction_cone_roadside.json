@@ -1,0 +1,10 @@
+{
+  "description": "A single cone at the road edge - the lane is actually open (false alarm).",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1},
+  "route": {"length_m": 300},
+  "actors": [
+    {"blueprint": "static.prop.constructioncone", "at": {"route_m": 60, "lateral_m": 2.3}}
+  ],
+  "triggers": {"before_cone": {"route_m": 48}}
+}

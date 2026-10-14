@@ -1,0 +1,9 @@
+{
+  "description": "The AV waits at a stop; an angry pedestrian stands next to the car.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1, "start_speed_mph": 0},
+  "route": {"length_m": 300},
+  "actors": [
+    {"blueprint": "walker.pedestrian.0012", "name": "bystander", "at": {"route_m": 3, "lateral_m": 3.2, "yaw": -90}}
+  ]
+}

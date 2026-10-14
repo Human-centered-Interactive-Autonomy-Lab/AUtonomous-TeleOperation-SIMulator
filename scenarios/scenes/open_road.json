@@ -1,0 +1,7 @@
+{
+  "description": "Plain drive with no obstacles. Used for status, passenger and software tasks.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1, "blueprint": "vehicle.tesla.model3"},
+  "route": {"length_m": 400},
+  "traffic": {"vehicles": 10, "walkers": 10}
+}

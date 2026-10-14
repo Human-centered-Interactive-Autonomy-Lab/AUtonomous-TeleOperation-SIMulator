@@ -1,0 +1,18 @@
+{
+  "description": "Construction barriers close the ego lane; cones taper into it.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1},
+  "route": {"length_m": 300},
+  "alternate_routes": [
+    {"label": "Detour via next left turn", "length_m": 250}
+  ],
+  "actors": [
+    {"blueprint": "static.prop.constructioncone", "at": {"route_m": 58, "lateral_m": 1.3}},
+    {"blueprint": "static.prop.constructioncone", "at": {"route_m": 62, "lateral_m": 0.6}},
+    {"blueprint": "static.prop.constructioncone", "at": {"route_m": 66, "lateral_m": -0.2}},
+    {"blueprint": "static.prop.streetbarrier", "at": {"route_m": 70, "lateral_m": -0.6, "yaw": 90}},
+    {"blueprint": "static.prop.streetbarrier", "at": {"route_m": 70, "lateral_m": 0.9, "yaw": 90}},
+    {"blueprint": "static.prop.warningconstruction", "at": {"route_m": 76, "lateral_m": 0.0, "yaw": 180}}
+  ],
+  "triggers": {"before_barrier": {"route_m": 40}}
+}

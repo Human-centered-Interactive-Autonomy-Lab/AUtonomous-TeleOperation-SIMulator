@@ -1,0 +1,9 @@
+{
+  "description": "Flat debris on the road. The AV cannot tell if it is safe to drive over.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1},
+  "route": {"length_m": 300},
+  "actors": [
+    {"blueprint": "static.prop.dirtdebris01", "name": "debris", "at": {"route_m": 55}}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "description": "A delivery van is parked in the ego lane; the lane to the left is free.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1},
+  "route": {"length_m": 300},
+  "actors": [
+    {"blueprint": "vehicle.carlamotors.carlacola", "at": {"route_m": 62}, "lights": ["LeftBlinker", "RightBlinker"]}
+  ]
+}

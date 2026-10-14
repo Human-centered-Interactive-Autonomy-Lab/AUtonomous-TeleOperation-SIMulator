@@ -1,0 +1,18 @@
+{
+  "description": "Two police cars with emergency lights block the lane ahead.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1},
+  "route": {"length_m": 300},
+  "alternate_routes": [
+    {"label": "Detour via next left turn", "length_m": 250},
+    {"label": "Detour via next right turn", "length_m": 250}
+  ],
+  "actors": [
+    {"blueprint": "vehicle.dodge.charger_police_2020", "at": {"route_m": 72, "lateral_m": 0.0, "yaw": 35},
+     "lights": ["Special1", "Special2", "Position"]},
+    {"blueprint": "vehicle.dodge.charger_police_2020", "at": {"route_m": 80, "lane": -1, "yaw": -30},
+     "lights": ["Special1", "Special2", "Position"]},
+    {"blueprint": "walker.pedestrian.0012", "at": {"route_m": 76, "lateral_m": 3.0}}
+  ],
+  "triggers": {"before_police": {"route_m": 55}}
+}

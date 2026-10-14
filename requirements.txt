@@ -1,0 +1,12 @@
+# Python packages AUTOSIM needs.  Install with:  pip install -r requirements.txt
+#
+# The CARLA client library must match your CARLA server version.  For a
+# packaged CARLA 0.9.15 either run  pip install carla==0.9.15  or install the
+# wheel shipped in  <CARLA>/PythonAPI/carla/dist/.
+pygame>=2.1
+numpy>=1.17
+# Needed by CARLA's navigation agents (autonomous driving in the CARLA backend):
+networkx>=2.2
+shapely>=1.7
+# For running the tests:
+pytest>=6

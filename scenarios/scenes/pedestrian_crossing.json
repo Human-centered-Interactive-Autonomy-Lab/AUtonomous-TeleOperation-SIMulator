@@ -1,0 +1,7 @@
+{
+  "description": "Busy pedestrian crossing ahead. The task script spawns crossing pedestrians.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1},
+  "route": {"length_m": 300},
+  "triggers": {"crosswalk": {"route_m": 50}}
+}
