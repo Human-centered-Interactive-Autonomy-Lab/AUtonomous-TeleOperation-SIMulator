@@ -2,14 +2,14 @@
 simulation.py -- what the rest of AUTOSIM may ask of the simulator.
 
 The operator interface, the experiment runner and task scripts never call
-CARLA directly.  They use a ``Simulation`` object, which has two versions:
+CARLA directly.  They use a ``Simulation`` object:
 
-  CarlaSimulation  (simulation_carla.py)  -- the real thing.
-  MockSimulation   (simulation_mock.py)   -- a tiny 2-D stand-in so the
-                                             interface can be developed and
-                                             demonstrated without CARLA.
+  CarlaSimulation    (simulation_carla.py)  -- the real thing.
+  OfflineSimulation  (below)                -- used when CARLA cannot be
+                     reached: the window still opens, with black cameras and
+                     inactive buttons, so the layout can be inspected.
 
-To support another simulator, write a third class with these methods.
+To support another simulator, write a class with these methods.
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -29,6 +29,7 @@ class DrivingMode:
     PULLED_OVER = "pulled_over"
     MANUAL = "manual"                  # operator drives with the keyboard
     ROUTE_COMPLETE = "route_complete"
+    OFFLINE = "offline"                # no connection to the simulator
 
     # Text shown under the speed read-out.
     LABELS = {
@@ -40,6 +41,7 @@ class DrivingMode:
         PULLED_OVER: "Pulled over",
         MANUAL: "Manual control",
         ROUTE_COMPLETE: "Route complete",
+        OFFLINE: "NOT CONNECTED TO CARLA",
     }
 
 
@@ -221,5 +223,91 @@ class Simulation:
         return []
 
     @property
-    def is_mock(self) -> bool:
+    def is_offline(self) -> bool:
         return False
+
+
+class OfflineSimulation(Simulation):
+    """Stands in when CARLA is not reachable.  Nothing moves, cameras stay
+    black, and every command does nothing."""
+
+    def __init__(self) -> None:
+        self.state = VehicleState()
+        self.state.mode = DrivingMode.OFFLINE
+
+    @property
+    def is_offline(self) -> bool:
+        return True
+
+    def connect(self) -> None:
+        pass
+
+    def load_scenario(self, *arguments: Any, **keywords: Any) -> None:
+        pass
+
+    def cleanup_scenario(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def tick(self, dt: float) -> VehicleState:
+        return self.state
+
+    def camera_frames(self) -> Dict[str, Tuple[float, Any]]:
+        return {}
+
+    def resume_autonomy(self) -> None:
+        pass
+
+    def soft_stop(self, reason: str = "") -> None:
+        pass
+
+    def emergency_stop(self) -> None:
+        pass
+
+    def pull_over(self) -> None:
+        pass
+
+    def change_lane(self, direction: str) -> bool:
+        return False
+
+    def reroute(self, alternate_index: int) -> bool:
+        return False
+
+    def set_manual_control(self, enabled: bool) -> None:
+        pass
+
+    def apply_manual_input(self, throttle: float, steer: float, brake: float, reverse: bool) -> None:
+        pass
+
+    def set_hazard_lights(self, on: bool) -> None:
+        pass
+
+    def set_target_speed(self, mph: float) -> None:
+        pass
+
+    def spawn_actor(self, blueprint: str, at: Placement, name: str = "") -> Optional[Any]:
+        return None
+
+    def spawn_walker(self, at: Placement, walk_to: Placement, speed_mps: float = 1.4,
+                     blueprint: str = "") -> Optional[Any]:
+        return None
+
+    def destroy_actor(self, handle: Any) -> None:
+        pass
+
+    def distance_to_route_point(self, route_m: float) -> float:
+        return float("inf")
+
+    def trigger_route_m(self, scene: Scene, trigger_name: str) -> Optional[float]:
+        return None
+
+    def project_to_route(self, x: float, y: float) -> float:
+        return 0.0
+
+    def road_polylines(self) -> List[List[Tuple[float, float]]]:
+        return []
+
+    def route_polyline(self) -> List[Tuple[float, float]]:
+        return []

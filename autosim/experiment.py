@@ -7,12 +7,13 @@ Run ``python -m autosim --help`` for every option.  Typical use:
         --order random --count 12 --wait-time 20 --wait-distribution exponential \\
         --video-delay 0.25 --participant P007
 
-    python -m autosim --mock          # no CARLA needed (development / demos)
 
 Flow of a session
 -----------------
   1. Parse options, read and validate the scenario file.
-  2. Connect to CARLA (or the mock), open the window, start data recording.
+  2. Connect to CARLA, open the window, start data recording.  If CARLA
+     cannot be reached, a warning is printed and the window opens anyway
+     with black cameras and inactive buttons (nothing is recorded).
   3. For each scenario in the schedule:
        a. show the waiting screen,
        b. load the scenario's world (the loading time counts toward the wait),
@@ -32,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from autosim import __version__, settings
 from autosim.distributions import Distribution, make_distribution, parse_spec
 from autosim.scenario import Scenario, ScenarioFileError, load_scenarios
+from autosim.simulation import OfflineSimulation
 
 DISTRIBUTION_CHOICES = ["deterministic", "uniform", "normal", "exponential", "clipped_exponential"]
 
@@ -100,7 +102,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     data.add_argument("--no-record", dest="record", action="store_false", help="do not write any data files")
 
     simulator = parser.add_argument_group("simulator")
-    simulator.add_argument("--mock", action="store_true", help="run without CARLA (simple built-in stand-in)")
     simulator.add_argument("--host", default=settings.CARLA_HOST, help="CARLA server address")
     simulator.add_argument("--port", type=int, default=settings.CARLA_PORT, help="CARLA server port")
     simulator.add_argument("--no-audio", dest="audio", action="store_false", help="disable sounds")
@@ -195,8 +196,12 @@ class ExperimentRunner:
         try:
             simulation.connect()
         except RuntimeError as error:
-            print("[experiment] {}".format(error))
-            return 3
+            print("[experiment] WARNING: {}".format(error))
+            print("[experiment] WARNING: no connection to CARLA. Showing the interface only: cameras are "
+                  "black, buttons do nothing, and no data is recorded. Close the window to exit.")
+            simulation = OfflineSimulation()
+            options.record = False
+            schedule = schedule[:1]
 
         missing = simulation.missing_maps([s.scene.map_name for s in scenarios if s.scene.map_name])
         if missing:
@@ -285,9 +290,6 @@ class ExperimentRunner:
         return 0
 
     def _make_simulation(self):
-        if self.options.mock:
-            from autosim.simulation_mock import MockSimulation
-            return MockSimulation()
         from autosim.simulation_carla import CarlaSimulation
         return CarlaSimulation(self.options.host, self.options.port)
 

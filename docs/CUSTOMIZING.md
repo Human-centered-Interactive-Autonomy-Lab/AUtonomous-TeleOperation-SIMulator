@@ -57,4 +57,4 @@ camera. The top-down camera is 14 m above the car by default: a close
 The program talks to the simulator only through the methods of
 `autosim/simulation.py`. Implementing those methods for another simulator
 leaves the interface, scenario files and logging unchanged.
-`simulation_mock.py` is a complete, small example.
+`simulation_carla.py` is the reference implementation.

@@ -162,7 +162,7 @@ class CarlaSimulation(Simulation):
     def connect(self) -> None:
         if carla is None:
             raise RuntimeError("The 'carla' Python package is not installed. Install the client that matches "
-                               "your CARLA server, e.g.  pip install carla==0.9.15  (or use --mock).")
+                               "your CARLA server, e.g.  pip install carla==0.9.15")
         try:
             self._BasicAgent, self._GlobalRoutePlanner, self._RoadOption = _import_agents()
         except ImportError as error:
@@ -609,13 +609,8 @@ class CarlaSimulation(Simulation):
         skip = int(LANE_CHANGE_SKIP_METERS / ROUTE_STEP_METERS)
         shifted = []
         for waypoint in remaining[skip:]:
-            target = waypoint
-            for _ in range(abs(lanes)):
-                neighbour = target.get_right_lane() if lanes > 0 else target.get_left_lane()
-                if neighbour is None or neighbour.lane_type != carla.LaneType.Driving:
-                    break
-                target = neighbour
-            shifted.append(target)
+            target = _lanes_over(waypoint, lanes, driving_only=True)
+            shifted.append(target if target is not None else waypoint)
         if shifted:
             self._set_agent_plan(shifted)
 
@@ -647,12 +642,9 @@ class CarlaSimulation(Simulation):
         if overshoot > 0.5:
             following = base.next(overshoot)
             base = following[0] if following else base
-        waypoint = base
-        for _ in range(abs(at.lane)):
-            neighbour = waypoint.get_right_lane() if at.lane > 0 else waypoint.get_left_lane()
-            if neighbour is None:
-                break
-            waypoint = neighbour
+        waypoint = _lanes_over(base, at.lane) if at.lane != 0 else base
+        if waypoint is None:
+            waypoint = base
         location = waypoint.transform.location
         if waypoint is base and at.lane != 0:   # no such lane: shift by lane widths instead
             right = base.transform.get_right_vector()
@@ -858,6 +850,26 @@ def _find_blueprint(library, name: str):
     except (IndexError, RuntimeError):
         matches = library.filter(name)
         return matches[0] if len(matches) else None
+
+
+def _lanes_over(waypoint, lanes: int, driving_only: bool = False):
+    """The waypoint ``lanes`` lanes to the right (negative = left) of ``waypoint``,
+    as seen in ``waypoint``'s direction of travel, or None if there is no such lane.
+
+    CARLA's get_left_lane()/get_right_lane() are relative to each waypoint's
+    OWN direction, and get_left_lane() of lane +-1 crosses the centre line into
+    the oncoming lane.  Once across, "our" left is that lane's right, so the
+    step direction is flipped whenever the lane-id sign changes.
+    """
+    our_side = waypoint.lane_id > 0
+    current = waypoint
+    for _ in range(abs(lanes)):
+        go_right = (lanes > 0) == ((current.lane_id > 0) == our_side)
+        neighbour = current.get_right_lane() if go_right else current.get_left_lane()
+        if neighbour is None or (driving_only and neighbour.lane_type != carla.LaneType.Driving):
+            return None
+        current = neighbour
+    return current
 
 
 def _yaw_change(a, b) -> float:

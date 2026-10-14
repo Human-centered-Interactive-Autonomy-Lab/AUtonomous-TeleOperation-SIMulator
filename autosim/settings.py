@@ -28,7 +28,6 @@ Sections
   9. Cameras
  10. Operator interface: window, layout, colors, fonts, timing
  11. Audio
- 12. Mock (CARLA-free) backend
 """
 
 from typing import Dict, List, Tuple
@@ -420,13 +419,3 @@ AUDIO_VOLUME: float = 0.5
 AUDIO_FOLDER: str = "audio"
 AUDIO_FILE_EXTENSIONS = (".wav", ".ogg", ".mp3", ".flac")
 
-
-# =============================================================================
-# 12. MOCK BACKEND (runs without CARLA, for development and demos)
-# =============================================================================
-
-MOCK_LANE_WIDTH_METERS: float = 3.5
-MOCK_LANE_COUNT: int = 2                       # lanes in the ego direction
-MOCK_GEO_ORIGIN: Tuple[float, float] = (40.0, -83.0)    # lat, lon of x=y=0
-MOCK_ACCELERATION_MPS2: float = 2.0
-MOCK_BRAKE_DECELERATION_MPS2: float = 7.0

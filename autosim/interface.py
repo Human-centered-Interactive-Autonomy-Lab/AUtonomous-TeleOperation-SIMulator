@@ -77,6 +77,7 @@ class OperatorInterface:
         self.alert_scroll = 0
         self.map_meters_across = settings.MAP_DEFAULT_METERS_ACROSS
         self._road_cache: List[List[Tuple[float, float]]] = []
+        self.offline = False          # no simulator: black cameras, inactive buttons
         self.resize(screen.get_size())
 
     # =====================================================================
@@ -115,6 +116,7 @@ class OperatorInterface:
         self.alert_scroll = 0
         self._camera_cache.clear()
         self._road_cache = session.simulation.road_polylines()
+        self.offline = session.simulation.is_offline
 
     # =====================================================================
     # Input
@@ -192,6 +194,8 @@ class OperatorInterface:
             self._draw_detailed_status(session)
         elif self.open_dialog is not None:
             self._draw_dialog(session, self.open_dialog)
+        if self.offline:
+            self._hotspots = []       # nothing is clickable without a simulator
         pygame.display.flip()
 
     def draw_waiting_screen(self, message: str) -> None:
@@ -343,7 +347,10 @@ class OperatorInterface:
         pygame.draw.rect(self.screen, C["panel_border"], rect, border_radius=4)
         area = self._camera_area(rect)
         camera = CAMERA_PANELS[panel_name]
-        if frame is None:
+        if self.offline:
+            pygame.draw.rect(self.screen, (0, 0, 0), area)
+            self._blit_text("No connection to CARLA", "normal", C["text_dim"], area.center, anchor="center")
+        elif frame is None:
             pygame.draw.rect(self.screen, C["camera_placeholder"], area)
             self._blit_text("No video", "normal", C["text_dim"], area.center, anchor="center")
         else:
@@ -644,7 +651,8 @@ class OperatorInterface:
     def _button(self, rect: Rect, label: str, style: str, on_press: Callable[[], None],
                 on_release: Optional[Callable[[], None]] = None, font: str = "normal", layer: int = 0,
                 enabled: bool = True, highlighted: bool = False, align: str = "center") -> None:
-        hover = rect.collidepoint(self._hover)
+        enabled = enabled and not self.offline
+        hover = rect.collidepoint(self._hover) and enabled
         colors = {
             "normal": ("button", "button_hover"),
             "link": ("panel", "button_hover"),

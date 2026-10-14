@@ -12,10 +12,6 @@ questions and gives high-level commands (pull over, emergency stop, call
 emergency or fleet services, talk to the passenger), or drives slowly by hand.
 AUTOSIM records what the operator did and when.
 
-![Operator interface](docs/images/question_blocked_lane.png)
-*The operator interface (screenshot from `--mock` mode, which draws simple
-stand-in camera images; with CARLA the views are rendered by the simulator).*
-
 ## Features
 
 * **Operator interface**: five camera views (front, left, right, rear,
@@ -46,8 +42,6 @@ stand-in camera images; with CARLA the views are rendered by the simulator).*
   collision with timestamps, plus a per-scenario summary CSV. The simulator
   records facts only. Which responses count as correct is decided by the
   experimenter.
-* **Mock mode** (`--mock`): runs the whole program without CARLA, for
-  development, demos and automated tests.
 
 ## Installation
 
@@ -64,10 +58,7 @@ stand-in camera images; with CARLA the views are rendered by the simulator).*
 ## Running
 
 ```bash
-# Try the interface without CARLA:
-python -m autosim --mock
-
-# Run the example battery against a running CARLA server:
+# Run the example battery (start CARLA first):
 python -m autosim --scenarios scenarios/example_battery.csv --participant P001
 
 # A randomized battery of 12 scenarios with exponential waits and degraded video:
@@ -78,6 +69,10 @@ python -m autosim --order random --count 12 \
 
 python -m autosim --help        # every option with its default
 ```
+
+If CARLA cannot be reached, AUTOSIM prints a warning and opens the
+interface anyway, with black camera views and inactive buttons, so the
+layout can be inspected. Nothing is recorded in that case.
 
 Each scenario ends when the operator presses **End supervision**. Close the
 window (or press Shift+Esc) to stop early. Data is saved either way, in
@@ -128,12 +123,10 @@ autosim/                 the program
   link.py                simulated video/input delay and frame rate
   simulation.py          the simulator interface ...
   simulation_carla.py    ... implemented with CARLA
-  simulation_mock.py     ... and a simple stand-in (--mock)
   datalog.py, audio.py, messages.py, distributions.py
 scenarios/               example battery, scenes, task scripts, audio
 tools/scene_editor.py    click-to-place scene editor (needs CARLA)
-tools/capture_screenshots.py   headless screenshots in mock mode
-tests/                   automated tests (pytest)
+tests/                   tests of the file formats and timing logic (pytest)
 docs/                    documentation
 ```
 
@@ -144,9 +137,9 @@ pip install pytest
 python -m pytest
 ```
 
-The tests run without CARLA and without a screen. They use the mock
-simulation and a small fake `carla` module that checks the CARLA backend's
-logic. Neither replaces trying a scenario in real CARLA.
+The tests cover the parts that do not need the simulator: reading
+scenario files, distributions, scenario order, and the simulated video and
+input delays.
 
 ## Status and limitations
 
@@ -158,7 +151,6 @@ AUTOSIM is under active development. Known limitations:
 * Hazard lights use CARLA's left and right blinker lights.
 * "Talk to passenger / externally" is push-to-talk with scripted replies
   (text and/or pre-recorded audio). There is no live voice link.
-* Mock mode is for development. Its camera images are simple drawings.
 
 ## License
 

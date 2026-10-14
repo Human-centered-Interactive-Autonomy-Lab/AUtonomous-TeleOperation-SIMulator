@@ -18,9 +18,9 @@
                task scripts) |        |  VideoLink: video delay, frame rate
                               v        v
                          simulation.py  (interface)
-                           /                 \
-              simulation_carla.py        simulation_mock.py
-              CARLA + BasicAgent          2-D stand-in (--mock)
+                                 |
+                       simulation_carla.py
+                       CARLA + BasicAgent
 ```
 
 ## One frame (about 30 per second)
@@ -50,6 +50,8 @@
   every frame, and clickable areas are recorded while drawing. No widget
   state needs to be kept in sync.
 * **One simulator interface.** The GUI, scenarios and logging never touch
-  CARLA directly, which makes the mock mode and the tests possible.
+  CARLA directly. All CARLA code is in `simulation_carla.py`. Without a
+  CARLA connection, `OfflineSimulation` stands in: black cameras and
+  inactive buttons.
 * **Facts, not grades.** The data records what the operator did and when.
   Scoring is left to the experimenter.
