@@ -257,6 +257,7 @@ DIALOGS: Dict[str, Dialog] = {
         DialogOption("Police non-emergency", _call("Police non-emergency")),
         DialogOption("Fire department", _call("Fire department")),
         DialogOption("EMS / Ambulance", _call("EMS")),
+        DialogOption("Custom number", _call("Custom number")),
         DialogOption("Close", _close),
     ]),
     "call": Dialog("Call", [
