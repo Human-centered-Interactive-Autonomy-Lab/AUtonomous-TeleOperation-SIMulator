@@ -198,6 +198,18 @@ class ExperimentRunner:
             print("[experiment] {}".format(error))
             return 3
 
+        missing = simulation.missing_maps([s.scene.map_name for s in scenarios if s.scene.map_name])
+        if missing:
+            skipped = [s for s in schedule if s.scene.map_name in missing]
+            print("[experiment] WARNING: the simulator does not have these maps: {}".format(", ".join(missing)))
+            print("[experiment] WARNING: skipping {} scheduled scenario(s) that use them: {}".format(
+                len(skipped), ", ".join(sorted(set(s.scenario_id for s in skipped)))))
+            schedule = [s for s in schedule if s.scene.map_name not in missing]
+            if not schedule:
+                print("[experiment] Nothing left to run.")
+                simulation.close()
+                return 4
+
         pygame.init()
         flags = pygame.FULLSCREEN if options.fullscreen else pygame.RESIZABLE
         size = (0, 0) if options.fullscreen else parse_window_size(options.window_size)

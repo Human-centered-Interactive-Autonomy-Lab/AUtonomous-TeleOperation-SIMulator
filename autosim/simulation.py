@@ -103,6 +103,10 @@ class Simulation:
         """Connect to the simulator.  Raise RuntimeError with a helpful message on failure."""
         raise NotImplementedError
 
+    def missing_maps(self, map_names: Sequence[str]) -> List[str]:
+        """Which of these map names the simulator does not have (checked at startup)."""
+        return []
+
     def load_scenario(self, scene: Scene, time_of_day: str, weather: str, lights: str,
                       cameras: Sequence[CameraRequest], target_speed_mph: float,
                       start_stopped: bool) -> None:

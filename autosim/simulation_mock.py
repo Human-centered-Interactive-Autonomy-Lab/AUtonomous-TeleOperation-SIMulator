@@ -207,6 +207,7 @@ class MockSimulation(Simulation):
         self.manual_input = (0.0, 0.0, 0.0, False)
         self.ignored_obstacles: set = set()
         self.pull_over_end_s = 0.0
+        self.lane_return_s: Optional[float] = None   # leave the oncoming lane here
         self._route_finishing = False            # pulling over because the route ended
         self.collisions = 0
         self.stop_reason = ""
@@ -245,6 +246,7 @@ class MockSimulation(Simulation):
             self._spawn_from_spec(spec)
         self.ignored_obstacles = set()
         self._route_finishing = False
+        self.lane_return_s = None
         self.collisions = 0
         self.stop_reason = ""
         self.state = VehicleState()
@@ -308,6 +310,8 @@ class MockSimulation(Simulation):
         if new_lane not in LANE_OFFSETS:
             return False
         self.target_d = new_lane * LANE
+        # Same as the CARLA backend: do not stay on the wrong side of the road.
+        self.lane_return_s = self.s + 35.0 if new_lane < 0 else None
         return True
 
     def reroute(self, alternate_index: int) -> bool:
@@ -421,6 +425,9 @@ class MockSimulation(Simulation):
             return
 
         if mode == DrivingMode.AUTONOMOUS:
+            if self.lane_return_s is not None and self.s >= self.lane_return_s:
+                self.lane_return_s = None
+                self.target_d = 0.0
             blocking = self._obstacles_ahead()
             walkers = [a for a in blocking if a.kind == "walker"]
             others = [a for a in blocking if a.kind != "walker"]
