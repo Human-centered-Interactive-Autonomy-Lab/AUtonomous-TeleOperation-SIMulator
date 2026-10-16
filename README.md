@@ -2,7 +2,7 @@
 
 AUTOSIM is an open-source testbed for **remote-assistance (teleoperation)
 experiments with automated vehicles**, built on the Python API of the
-[CARLA](https://carla.org) driving simulator. 
+[CARLA](https://carla.org) driving simulator.X 
 
 A participant acts as a **remote operator** (RO) supervising a self-driving
 car. The car sometimes asks for help: *"Is the left lane open?"*, *"Heavy
