@@ -405,6 +405,7 @@ class CarlaSimulation(Simulation):
             self.manual_input = (0.0, 0.0, settings.MANUAL_COAST_BRAKE, False)
         elif self.mode == DrivingMode.MANUAL:
             self.mode = DrivingMode.HOLDING
+            self._replan_from_here()
 
     def apply_manual_input(self, throttle: float, steer: float, brake: float, reverse: bool) -> None:
         self.manual_input = (throttle, steer, brake, reverse)
@@ -561,6 +562,7 @@ class CarlaSimulation(Simulation):
             raise RuntimeError("Could not spawn the ego vehicle.")
         self.ego = ego
         self.spawned.append(ego)
+        self.world.wait_for_tick()
 
     def _plan_route(self, start, spec: RouteSpec, turn_at_first_junction: str = "") -> List[Any]:
         """Waypoints from ``start``: to the spec's destination, or following the road."""
