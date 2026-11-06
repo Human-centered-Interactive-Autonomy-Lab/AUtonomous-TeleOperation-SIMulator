@@ -33,7 +33,9 @@ details such as call partner or fleet request), `command_executed` (when a
 delayed command actually reached the vehicle), `decision_shown`,
 `alert_shown`, `notification`, `notification_opened`, `mode_change`,
 `task_triggered`, `speech`, `talk_start`/`talk_end`, `collision`,
-`manual_control_refused`, `map_zoom`, `status_changed`, `route_complete`,
+`manual_control_refused`, `map_zoom`, `status_changed`,
+`passenger_dropoff_started`/`passenger_dropoff_complete` (the passenger
+getting out at the end of the route), `route_complete`,
 `task_error`, `scenario_end`, plus anything task scripts log.
 
 ## scenarios.csv

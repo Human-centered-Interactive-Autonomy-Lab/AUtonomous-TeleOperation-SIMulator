@@ -252,6 +252,23 @@ PULL_OVER_SPEED_MPH: float = 6.0
 PULL_OVER_DISTANCE_METERS: float = 18.0
 PULL_OVER_EDGE_MARGIN_METERS: float = 0.4    # gap kept to the lane edge
 
+# End of the route: start pulling over this far before the end (but only
+# after the last junction), so the car reaches the curb of the rightmost lane
+# and stops there.  Routes are extended so that their last stretch is at
+# least this far clear of junctions, leaving room to slow down and pull over.
+ROUTE_END_PULL_OVER_START_METERS: float = 40.0
+ROUTE_END_CLEAR_OF_JUNCTION_METERS: float = 20.0
+ROUTE_END_MAX_EXTENSION_METERS: float = 60.0
+
+# At the end of the route a passenger gets out on the curb side, walks to the
+# sidewalk and away, and disappears.  The route is complete once they are gone.
+DROP_OFF_PASSENGER_AT_ROUTE_END: bool = True
+PASSENGER_WALK_SPEED_MPS: float = 1.3
+PASSENGER_WALK_AWAY_METERS: float = 15.0
+PASSENGER_MAX_SIDEWALK_DISTANCE_METERS: float = 6.0   # farther than this: walk straight out instead
+PASSENGER_DOOR_OPEN_SECONDS: float = 3.0              # cars without opening doors skip this
+PASSENGER_DROPOFF_TIMEOUT_SECONDS: float = 30.0       # remove a passenger who gets stuck
+
 # Time budget for a commanded lane change (seconds driving in the old lane
 # first, then the maneuver).
 LANE_CHANGE_SAME_LANE_SECONDS: float = 0.5
@@ -262,6 +279,9 @@ STOPPED_SPEED_MPH: float = 0.5
 
 # Spawn a pedestrian beside the car when the route is completed.
 SPAWN_PEDESTRIAN_AT_ROUTE_END: bool = True
+
+# Alert shown while the passenger gets out at the end of the route.
+PASSENGER_DROPOFF_ALERT_TEXT: str = "Passenger is getting out"
 
 # Text shown in the Route panel after the route is completed.
 ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT: str = "Route complete. Waiting for next customer."
