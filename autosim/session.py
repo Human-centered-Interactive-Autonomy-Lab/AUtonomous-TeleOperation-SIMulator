@@ -422,6 +422,13 @@ class ScenarioSession:
             if (state.mode == DrivingMode.HOLDING and old == DrivingMode.STOPPING and state.stop_reason
                     and not state.stop_reason.startswith(TASK_STOP_PREFIX)):
                 self.add_alert(state.stop_reason, "warning")
+            if state.mode == DrivingMode.DROPPING_OFF:
+                self.log("passenger_dropoff_started")
+                self.add_alert(settings.PASSENGER_DROPOFF_ALERT_TEXT, "info")
+            elif old == DrivingMode.DROPPING_OFF:
+                self.remove_alert(settings.PASSENGER_DROPOFF_ALERT_TEXT)
+                if state.mode == DrivingMode.ROUTE_COMPLETE:
+                    self.log("passenger_dropoff_complete")
             if state.mode == DrivingMode.ROUTE_COMPLETE:
                 self._on_route_complete()
             if old:

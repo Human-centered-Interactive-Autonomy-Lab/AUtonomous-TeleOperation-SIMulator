@@ -27,6 +27,7 @@ class DrivingMode:
     EMERGENCY_STOP = "emergency_stop"  # E-STOP pressed
     PULLING_OVER = "pulling_over"
     PULLED_OVER = "pulled_over"
+    DROPPING_OFF = "dropping_off"      # stopped at the route end, passenger getting out
     MANUAL = "manual"                  # operator drives with the keyboard
     ROUTE_COMPLETE = "route_complete"
     OFFLINE = "offline"                # no connection to the simulator
@@ -39,6 +40,7 @@ class DrivingMode:
         EMERGENCY_STOP: "EMERGENCY STOP",
         PULLING_OVER: "Pulling over...",
         PULLED_OVER: "Pulled over",
+        DROPPING_OFF: "Passenger exiting",
         MANUAL: "Manual control",
         ROUTE_COMPLETE: "Route complete",
         OFFLINE: "NOT CONNECTED TO CARLA",
