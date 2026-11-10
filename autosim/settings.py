@@ -240,6 +240,10 @@ OBSTACLE_LANE_HALF_WIDTH_METERS: float = 1.6
 # distance ahead count as "checked by the operator" and are no longer avoided.
 RESUME_CLEARS_OBSTACLES_WITHIN_METERS: float = 30.0
 
+# A detour (reroute) is only taken if no placed obstacle lies on its first
+# stretch; otherwise the other turn, then straight on, is tried.
+DETOUR_CHECK_METERS: float = 80.0
+
 # Traffic rules in AV mode.  CARLA's BasicAgent stops at red lights and for
 # vehicles directly ahead; AUTOSIM adds the rest.  Each can be switched off,
 # e.g. for a study in which the AV breaks a rule on purpose.

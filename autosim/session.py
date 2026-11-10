@@ -276,7 +276,7 @@ class ScenarioSession:
             self.feedback("Please take manual control and drive around.")
         elif name == "reroute":
             index = int(argument) - 1 if argument.isdigit() else 0
-            run(lambda: simulation.reroute(index) and simulation.resume_autonomy())
+            run(lambda: simulation.reroute(index) and simulation.resume_autonomy(obstacles_checked=False))
         # "stay_stopped" and "none" deliberately do nothing.
 
     def request_manual_control(self) -> bool:
