@@ -68,9 +68,16 @@ class VideoLink:
         order: a frame is released no earlier than the one before it.
         """
         channel = self._channels.setdefault(camera, _CameraChannel())
-        if capture_time < channel.next_accept_time:
+        interval = self._next_frame_interval()
+        # Small tolerance so a camera running at exactly fps is not dropped by
+        # floating-point noise.
+        if capture_time < channel.next_accept_time - 0.02 * interval:
             return
-        channel.next_accept_time = capture_time + self._next_frame_interval()
+        # Keep frames on a steady schedule (not "interval after the last kept frame"),
+        # so the average rate is the set fps even when it does not divide the camera's
+        # rate: 20 fps from a 30 fps camera keeps 2 of every 3 frames, not 1 of 2.
+        on_schedule = capture_time - channel.next_accept_time < interval
+        channel.next_accept_time = (channel.next_accept_time if on_schedule else capture_time) + interval
         release_time = max(capture_time + self.delay.sample(self.rng), channel.last_release_time)
         channel.last_release_time = release_time
         channel.pending.append((release_time, frame))
@@ -89,9 +96,7 @@ class VideoLink:
     def _next_frame_interval(self) -> float:
         fps = self.fps if self.fps_sd == 0 else self.rng.gauss(self.fps, self.fps_sd)
         fps = max(0.5, fps)   # never wait more than 2 s for a frame
-        # Accept slightly early so a camera running at exactly fps is not
-        # dropped by floating-point noise.
-        return 0.98 / fps
+        return 1.0 / fps
 
 
 class CommandLink:

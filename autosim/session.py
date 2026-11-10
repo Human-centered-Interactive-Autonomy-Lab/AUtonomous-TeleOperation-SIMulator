@@ -13,6 +13,7 @@ simulation, runs the task logic, and logs every event.
          +------ draws state -----+    +---- hooks ---- tasks (TaskScript)
 """
 
+import copy
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -27,6 +28,7 @@ from autosim.simulation import DrivingMode, Simulation, VehicleState
 from autosim.tasks import TaskContext, TaskScript, build_tasks
 
 METERS_PER_MILE = 1609.344
+TELEMETRY_CHANNEL = "telemetry"   # vehicle state sent over the video link
 TASK_STOP_PREFIX = "Task:"      # stop reasons from task logic start with this (no extra alert)
 
 
@@ -82,7 +84,8 @@ class ScenarioSession:
         self.rng = rng
 
         self.start_time = time.monotonic()
-        self.vehicle_state = VehicleState()
+        self.vehicle_state = VehicleState()   # the car right now (driving logic, tasks, data)
+        self.shown_state = VehicleState()     # what the operator's screen shows (delayed like the video)
         self.status_values: Dict[str, Any] = {}
         self.alerts: List[Alert] = []
         self.decision: Optional[Decision] = None
@@ -167,6 +170,12 @@ class ScenarioSession:
         self._call_tasks("on_tick", dt)
         for camera, (capture_time, frame) in self.simulation.camera_frames().items():
             self.video_link.push(camera, capture_time, frame)
+        # Speed, mode, map position and progress travel with the video.
+        if settings.TELEMETRY_FOLLOWS_VIDEO:
+            self.video_link.push(TELEMETRY_CHANNEL, now, copy.copy(self.vehicle_state))
+            self.shown_state = self.video_link.frame(TELEMETRY_CHANNEL, now) or self.shown_state
+        else:
+            self.shown_state = self.vehicle_state
 
     def end(self) -> Dict[str, Any]:
         """Finish the scenario; returns the summary row for the data file."""
@@ -276,7 +285,7 @@ class ScenarioSession:
             self.feedback("Please take manual control and drive around.")
         elif name == "reroute":
             index = int(argument) - 1 if argument.isdigit() else 0
-            run(lambda: simulation.reroute(index) and simulation.resume_autonomy())
+            run(lambda: simulation.reroute(index) and simulation.resume_autonomy(obstacles_checked=False))
         # "stay_stopped" and "none" deliberately do nothing.
 
     def request_manual_control(self) -> bool:
@@ -378,8 +387,9 @@ class ScenarioSession:
     # ======================================================================
 
     def _trip_meters(self) -> Tuple[float, float]:
-        """(metres driven, metres left) of the current trip, along the route the car is following."""
-        state = self.vehicle_state
+        """(metres driven, metres left) of the current trip, along the route the car is following,
+        as the operator sees it (delayed like the video)."""
+        state = self.shown_state
         driven = max(0.0, state.route_traveled_m - self.trip_start_m)
         left = 0.0 if self.route_complete else max(0.0, state.route_length_m - state.route_traveled_m)
         return driven, left
@@ -404,7 +414,7 @@ class ScenarioSession:
 
     def route_message(self) -> str:
         """Text shown in the Route panel instead of the progress bar ("" = show progress)."""
-        if self.vehicle_state.trip_leg == "pickup":
+        if self.shown_state.trip_leg == "pickup":
             return settings.ROUTE_TO_PICKUP_TEXT
         if not self.route_complete:
             return ""

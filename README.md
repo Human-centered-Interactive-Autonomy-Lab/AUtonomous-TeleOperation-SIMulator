@@ -37,7 +37,9 @@ AUTOSIM records what the operator did and when.
   exponential).
 * **Simulated network link**: video delay, input (command) delay, video
   frame rate and its variability, and video resolution, each with a
-  configurable distribution.
+  configurable distribution. The usual values are three lines at the top of
+  `autosim/settings.py` (`INPUT_DELAY_SECONDS`, `VIDEO_DELAY_SECONDS`,
+  `VIDEO_FPS`); the speed, mode and map read-outs are delayed with the video.
 * **Data logging**: an event log of every action, answer, alert and
   collision with timestamps, plus a per-scenario summary CSV. The simulator
   records facts only. Which responses count as correct is decided by the

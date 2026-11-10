@@ -245,7 +245,7 @@ class OperatorInterface:
 
     def _draw_speed(self, rect: Rect, session: ScenarioSession) -> None:
         content = self._panel(rect)
-        state = session.vehicle_state
+        state = session.shown_state      # delayed like the video
         speed = self._text("{:.0f}".format(state.speed_mph), "big", C["text"])
         speed_rect = speed.get_rect(midleft=(content.x + 8, rect.centery))
         self.screen.blit(speed, speed_rect)
@@ -424,7 +424,7 @@ class OperatorInterface:
     def _draw_map(self, rect: Rect, session: ScenarioSession) -> None:
         content = self._panel(rect, settings.PANEL_TITLES.get("map"))
         pygame.draw.rect(self.screen, C["map_background"], content)
-        state = session.vehicle_state
+        state = session.shown_state      # delayed like the video
         scale = content.width / self.map_meters_across
 
         def to_screen(point: Tuple[float, float]) -> Tuple[float, float]:

@@ -145,8 +145,10 @@ class Simulation:
     # --------------------------------------------------------- vehicle commands
     # Called by the interface (after the simulated input delay) and by tasks.
 
-    def resume_autonomy(self) -> None:
-        """Hand control back to the automated driver, continuing the route."""
+    def resume_autonomy(self, obstacles_checked: bool = True) -> None:
+        """Hand control back to the automated driver, continuing the route.  With
+        ``obstacles_checked`` the obstacles it stopped for count as checked by the
+        operator and are passed; without (after a detour) they are still avoided."""
         raise NotImplementedError
 
     def soft_stop(self, reason: str = "") -> None:
@@ -269,7 +271,7 @@ class OfflineSimulation(Simulation):
     def camera_frames(self) -> Dict[str, Tuple[float, Any]]:
         return {}
 
-    def resume_autonomy(self) -> None:
+    def resume_autonomy(self, obstacles_checked: bool = True) -> None:
         pass
 
     def soft_stop(self, reason: str = "") -> None:

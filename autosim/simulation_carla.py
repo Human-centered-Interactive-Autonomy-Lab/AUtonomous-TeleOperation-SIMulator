@@ -531,12 +531,14 @@ class CarlaSimulation(Simulation):
     # Commands
     # =====================================================================
 
-    def resume_autonomy(self) -> None:
+    def resume_autonomy(self, obstacles_checked: bool = True) -> None:
         if self.ego is None:
             return
-        # Obstacles the AV is waiting at are now "checked by the operator".
-        for actor in self._actors_in_path(settings.RESUME_CLEARS_OBSTACLES_WITHIN_METERS, walkers=False):
-            self.ignored_obstacles.add(actor.id)
+        # Obstacles the AV is waiting at are now "checked by the operator" -- not after a
+        # detour, where the operator said the way ahead is closed.
+        if obstacles_checked:
+            for actor in self._actors_in_path(settings.RESUME_CLEARS_OBSTACLES_WITHIN_METERS, walkers=False):
+                self.ignored_obstacles.add(actor.id)
         self.agent.set_offset(0.0)
         self.agent.set_target_speed(self.target_speed_mph * MPH_TO_KMH)
         if self.mode in (DrivingMode.MANUAL, DrivingMode.PULLED_OVER, DrivingMode.ROUTE_COMPLETE,
@@ -639,15 +641,48 @@ class CarlaSimulation(Simulation):
         spec = routes[alternate_index] if alternate_index < len(routes) else RouteSpec({})
         if alternate_index >= max(1, len(routes)):
             return False
-        turn = "left" if alternate_index % 2 == 0 else "right"
+        # A detour must not lead through what the car stopped for: try the requested
+        # turn, then the other one, then straight on; refuse if all are blocked.
+        preferred = "left" if alternate_index % 2 == 0 else "right"
         start = self.map.get_waypoint(self.ego.get_location())
-        waypoints = self._plan_route(start, spec, turn_at_first_junction=turn)
+        blocker = None
+        for turn in (preferred, "right" if preferred == "left" else "left", ""):
+            waypoints = self._plan_route(start, spec, turn_at_first_junction=turn)
+            blocker = self._obstacle_along(waypoints, settings.DETOUR_CHECK_METERS)
+            if blocker is None:
+                break
+        if blocker is not None:
+            name = self.actor_names.get(blocker.id) or _describe(blocker)
+            print("[carla] No detour around the {} from here.".format(name))
+            self.soft_stop("No detour around the {} from here: turn around with Manual Control".format(name))
+            return False
+        if turn != preferred:
+            print("[carla] Detour: the {} turn is blocked; going {} instead.".format(preferred, turn or "straight on"))
         self.route = _Route(waypoints, self.state.route_traveled_m)
         self._extend_route_past_junction()
         self.route_index = 0
         self.lane_return_at_m = None
         self._set_agent_plan(self.route.waypoints)
         return True
+
+    def _obstacle_along(self, waypoints: List[Any], reach: float) -> Optional[Any]:
+        """The first placed prop or vehicle within ``reach`` metres along these waypoints, or None."""
+        path = _Route(waypoints)
+        points = path.locations
+        for actor in self.spawned:
+            if actor.id not in self.scene_actor_ids or actor.type_id.startswith("walker."):
+                continue
+            location = actor.get_location()
+            for index in range(len(points) - 1):       # true distance to each piece of the path
+                if path.cumulative[index] > reach:
+                    break
+                (x1, y1), (x2, y2) = points[index], points[index + 1]
+                dx, dy = x2 - x1, y2 - y1
+                t = max(0.0, min(1.0, ((location.x - x1) * dx + (location.y - y1) * dy) / (dx * dx + dy * dy or 1e-9)))
+                if math.hypot(location.x - x1 - dx * t, location.y - y1 - dy * t) < \
+                        settings.OBSTACLE_LANE_HALF_WIDTH_METERS:
+                    return actor
+        return None
 
     def start_next_trip(self, pickup_after_m: float, trip_length_m: float) -> bool:
         if self.ego is None or self.mode != DrivingMode.ROUTE_COMPLETE:

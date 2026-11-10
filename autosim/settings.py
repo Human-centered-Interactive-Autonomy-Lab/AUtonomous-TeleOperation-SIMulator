@@ -17,6 +17,7 @@ How to use this file
 
 Sections
 --------
+  0. QUICK SETTINGS: remote-driving delay and frame rate  <-- start here
   1. CARLA connection
   2. Files and folders
   3. Experiment flow (order, count, waiting time)
@@ -31,6 +32,29 @@ Sections
 """
 
 from typing import Dict, List, Tuple
+
+# =============================================================================
+# 0. QUICK SETTINGS: REMOTE-DRIVING DELAY AND FRAME RATE
+# =============================================================================
+# In real remote driving nothing is immediate: commands take time to reach
+# the car, and its video takes time to reach the operator, at a limited
+# frame rate.  Change these three numbers to set that for every scenario.
+#
+#   press a button --INPUT_DELAY--> the car reacts --VIDEO_DELAY--> you see it
+#
+# So the time from pressing a button to seeing the result on screen is
+# INPUT_DELAY_SECONDS + VIDEO_DELAY_SECONDS.  0 / 0 / 20 = an ideal link.
+# (Random delays, frame-rate jitter and per-scenario values: section 4.)
+
+INPUT_DELAY_SECONDS: float = 0.0    # button press -> the car carries it out
+VIDEO_DELAY_SECONDS: float = 0.0    # the car's cameras -> the operator's screen
+VIDEO_FPS: float = 20.0             # camera frames per second on the operator's screen (at most 30)
+
+# The speed, driving mode, map and route progress shown to the operator come
+# over the same link as the video, so they are delayed and updated like it.
+# False shows them without delay (only the cameras are delayed).
+TELEMETRY_FOLLOWS_VIDEO: bool = True
+
 
 # =============================================================================
 # 1. CARLA CONNECTION
@@ -93,15 +117,18 @@ DEFAULT_WAIT_MAX_SECONDS: float = 600.0
 # =============================================================================
 # 4. SIMULATED COMMUNICATION LINK
 # =============================================================================
-# The operator sees the world through a (simulated) network link.  Delays are
-# drawn from a distribution for every frame / every command, using the same
-# distribution kinds as the waiting time above.
+# The operator sees the world through a (simulated) network link.  The usual
+# values are the QUICK SETTINGS at the top of this file.  Here: random delays
+# (a distribution and its spread, drawn for every frame / every command, with
+# the same kinds as the waiting time above) and frame-rate jitter.  The
+# command line (--input-delay, --video-delay, --video-fps, ...) and the
+# scenario columns video_delay / input_delay override these.
 
-DEFAULT_VIDEO_DELAY_SECONDS: float = 0.0
+DEFAULT_VIDEO_DELAY_SECONDS: float = VIDEO_DELAY_SECONDS
 DEFAULT_VIDEO_DELAY_DISTRIBUTION: str = "deterministic"
 DEFAULT_VIDEO_DELAY_SPREAD_SECONDS: float = 0.0
 
-DEFAULT_INPUT_DELAY_SECONDS: float = 0.0
+DEFAULT_INPUT_DELAY_SECONDS: float = INPUT_DELAY_SECONDS
 DEFAULT_INPUT_DELAY_DISTRIBUTION: str = "deterministic"
 DEFAULT_INPUT_DELAY_SPREAD_SECONDS: float = 0.0
 
@@ -111,7 +138,7 @@ EMERGENCY_STOP_IGNORES_INPUT_DELAY: bool = False
 
 # Frames per second delivered to the operator, and the standard deviation of
 # the frame rate (frames per second) to simulate an unsteady stream.
-DEFAULT_VIDEO_FPS: float = 20.0
+DEFAULT_VIDEO_FPS: float = VIDEO_FPS
 DEFAULT_VIDEO_FPS_VARIABILITY: float = 0.0
 
 # Camera image resolution as a fraction of the on-screen panel size.
@@ -239,6 +266,10 @@ OBSTACLE_LANE_HALF_WIDTH_METERS: float = 1.6
 # When the operator tells a stopped AV to continue, obstacles within this
 # distance ahead count as "checked by the operator" and are no longer avoided.
 RESUME_CLEARS_OBSTACLES_WITHIN_METERS: float = 30.0
+
+# A detour (reroute) is only taken if no placed obstacle lies on its first
+# stretch; otherwise the other turn, then straight on, is tried.
+DETOUR_CHECK_METERS: float = 80.0
 
 # Traffic rules in AV mode.  CARLA's BasicAgent stops at red lights and for
 # vehicles directly ahead; AUTOSIM adds the rest.  Each can be switched off,
