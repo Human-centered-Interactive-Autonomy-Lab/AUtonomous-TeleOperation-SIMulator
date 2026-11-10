@@ -243,6 +243,22 @@ OBSTACLE_LANE_HALF_WIDTH_METERS: float = 1.6
 # distance ahead count as "checked by the operator" and are no longer avoided.
 RESUME_CLEARS_OBSTACLES_WITHIN_METERS: float = 30.0
 
+# Traffic rules in AV mode.  CARLA's BasicAgent stops at red lights and for
+# vehicles directly ahead; AUTOSIM adds the rest.  Each can be switched off,
+# e.g. for a study in which the AV breaks a rule on purpose.
+OBEY_SPEED_LIMITS: bool = True             # never faster than the road's limit
+OBEY_STOP_SIGNS: bool = True               # full stop at the line, then wait
+YIELD_AT_INTERSECTIONS: bool = True        # give way to cross traffic at intersections without lights
+
+STOP_SIGN_WAIT_SECONDS: float = 2.0        # standing still at the stop line before going on
+STOP_SIGN_DECELERATION_MPS2: float = 2.0   # gentle approach to the stop line
+STOP_LINE_SETBACK_METERS: float = 1.5      # stop this far before the intersection begins
+INTERSECTION_LOOKAHEAD_METERS: float = 35.0
+INTERSECTION_APPROACH_SPEED_MPH: float = 12.0   # into intersections without lights
+YIELD_GAP_SECONDS: float = 4.0             # cross traffic arriving sooner than this: wait
+YIELD_WATCH_METERS: float = 35.0           # look this far up the other roads for cross traffic
+YIELD_MAX_WAIT_SECONDS: float = 15.0       # then stop and ask the operator (Resume AV crosses)
+
 # Controlled ("soft") stop used by task logic, and the emergency stop.
 SOFT_STOP_BRAKE: float = 0.5
 EMERGENCY_STOP_BRAKE: float = 1.0

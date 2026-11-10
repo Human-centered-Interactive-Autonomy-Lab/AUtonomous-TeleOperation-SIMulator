@@ -115,6 +115,7 @@ class ScenarioSession:
         self.summary_extra: Dict[str, Any] = {}
         self._last_mode = ""
         self._last_collisions = 0
+        self._last_waiting_for = ""
 
         self.tasks: List[TaskScript] = []
         self.context = TaskContext(self)
@@ -440,6 +441,12 @@ class ScenarioSession:
             self.add_alert("Collision detected", "critical")
         if state.hazard_lights_on != self.hazard_lights_on:
             self.hazard_lights_on = state.hazard_lights_on
+        if state.waiting_for != self._last_waiting_for:   # the AV obeying a stop sign / giving way
+            if state.waiting_for:
+                self.log("av_waiting", reason=state.waiting_for)
+            else:
+                self.log("av_waiting_end", reason=self._last_waiting_for)
+            self._last_waiting_for = state.waiting_for
 
     def _on_route_complete(self) -> None:
         self.route_complete = True

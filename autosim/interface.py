@@ -229,6 +229,8 @@ class OperatorInterface:
             C["text_warning"] if state.mode in (DrivingMode.HOLDING, DrivingMode.STOPPING, DrivingMode.MANUAL)
             else C["text_dim"])
         label = DrivingMode.LABELS.get(state.mode, state.mode)
+        if state.waiting_for:            # e.g. "AV mode - stop sign"
+            label = "{} - {}".format(label, state.waiting_for)
         self._blit_text(label, "small", mode_color, (rect.right - 10, rect.centery - 8), anchor="midright")
         if session.hazard_lights_on and int(time.monotonic() * 2) % 2 == 0:
             self._blit_text("HAZARDS", "small", C["text_warning"], (rect.right - 10, rect.centery + 10),

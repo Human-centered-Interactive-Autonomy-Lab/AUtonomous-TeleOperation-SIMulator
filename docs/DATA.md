@@ -38,6 +38,9 @@ delayed command actually reached the vehicle), `decision_shown`,
 getting out at the end of the route), `route_complete`,
 `task_error`, `scenario_end`, plus anything task scripts log.
 
+Traffic rules in AV mode log `av_waiting` when a rule holds the car and
+`av_waiting_end` when it lets go; `reason` is `stop sign` or `cross traffic`.
+
 ## scenarios.csv
 
 | Column                                   | Meaning                                               |
