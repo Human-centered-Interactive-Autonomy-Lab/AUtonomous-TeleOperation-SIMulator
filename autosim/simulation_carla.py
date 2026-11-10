@@ -156,6 +156,11 @@ class CarlaSimulation(Simulation):
         self._yielding = False                      # waiting for a pedestrian to pass
         self._road_cache: Dict[str, List[List[Tuple[float, float]]]] = {}
         self._planner_cache: Dict[str, Any] = {}
+        self._stop_signs: List[Tuple[Any, float]] = []     # (stop-sign approach zone, its lane's yaw)
+        self._light_locations: List[Any] = []
+        self._junctions: List[Dict[str, Any]] = []         # intersections along the current route
+        self._junctions_route: Optional[_Route] = None      # the route they were found for
+        self._junction_asked: Optional[Dict[str, Any]] = None   # blocked intersection the operator was asked about
         self._BasicAgent = self._GlobalRoutePlanner = self._RoadOption = None
 
     # =====================================================================
@@ -195,6 +200,7 @@ class CarlaSimulation(Simulation):
         self.scene = scene
         self._load_map(scene.map_name)
         self._apply_environment(time_of_day, weather, lights)
+        self._cache_traffic_controls()
         self.state = VehicleState()
         self._collisions = []
         self.ignored_obstacles = set()
@@ -285,6 +291,7 @@ class CarlaSimulation(Simulation):
 
     def _control_for_mode(self):
         mode = self.mode
+        self.state.waiting_for = ""      # set again below while a traffic rule holds the car
         speed_mph = self.state.speed_mph
         stopped = speed_mph < settings.STOPPED_SPEED_MPH
 
@@ -342,7 +349,159 @@ class CarlaSimulation(Simulation):
             self._yielding = walker_in_path
         if self._yielding:
             return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+        held = self._traffic_rules()
+        if held is not None:
+            return held
         return self.agent.run_step()
+
+    # --- traffic rules (AV mode) ----------------------------------------------
+
+    def _cache_traffic_controls(self) -> None:
+        """Stop-sign approach zones and traffic-light positions on the current map."""
+        self._stop_signs = []
+        for sign in self.world.get_actors().filter("traffic.stop"):
+            try:
+                zone = sign.get_transform().transform(sign.trigger_volume.location)
+            except (AttributeError, RuntimeError):
+                continue
+            lane = self.map.get_waypoint(zone)
+            if lane is not None:
+                self._stop_signs.append((zone, lane.transform.rotation.yaw))
+        self._light_locations = [light.get_location()
+                                 for light in self.world.get_actors().filter("traffic.traffic_light")]
+        self._junctions_route = None
+        self._junction_asked = None
+        print("[carla] Traffic rules: {} stop signs, {} traffic lights on this map.".format(
+            len(self._stop_signs), len(self._light_locations)))
+
+    def _route_junctions(self) -> List[Dict[str, Any]]:
+        """The intersections along the current route (found once per route)."""
+        if self._junctions_route is self.route:
+            return self._junctions
+        route, waypoints = self.route, self.route.waypoints
+        junctions, index = [], 0
+        while index < len(waypoints):
+            if not waypoints[index].is_junction:
+                index += 1
+                continue
+            start = index
+            while index < len(waypoints) and waypoints[index].is_junction:
+                index += 1
+            inside = waypoints[start:index]
+            before, after = waypoints[max(0, start - 1)], waypoints[min(index, len(waypoints) - 1)]
+            center = carla.Location(sum(w.transform.location.x for w in inside) / len(inside),
+                                    sum(w.transform.location.y for w in inside) / len(inside),
+                                    inside[0].transform.location.z)
+            radius = max(8.0, 0.5 * before.transform.location.distance(after.transform.location))
+            try:
+                box = inside[0].get_junction().bounding_box
+                radius = max(box.extent.x, box.extent.y) + 1.0
+                if box.location.distance(center) < radius:
+                    center = box.location
+            except (AttributeError, RuntimeError):
+                pass
+            entry_m = route.cumulative[start]
+            signalized = any(light.distance(center) < radius + 12.0 for light in self._light_locations)
+            stop_m = None
+            if not signalized:
+                for zone, lane_yaw in self._stop_signs:
+                    if zone.distance(before.transform.location) > 25.0:
+                        continue
+                    zone_m, lateral, near = route.project(zone.x, zone.y)
+                    heading = (lane_yaw - waypoints[near].transform.rotation.yaw + 180.0) % 360.0 - 180.0
+                    if entry_m - 25.0 <= zone_m <= entry_m + 1.0 and abs(lateral) < 4.0 and abs(heading) < 45.0:
+                        stop_m = entry_m - settings.STOP_LINE_SETBACK_METERS
+                        break
+            junctions.append({"entry_m": entry_m, "center": center, "radius": radius,
+                              "turn": _yaw_change(before, after), "signalized": signalized, "stop_m": stop_m,
+                              "stopped_at": None, "stop_done": False, "cleared": False, "waiting_since": None})
+        self._junctions, self._junctions_route = junctions, route
+        return junctions
+
+    def _traffic_rules(self) -> Optional[Any]:
+        """Speed limit, stop signs and right of way.  A braking control while a rule holds the car, else None.
+
+        Red lights and vehicles directly ahead are handled by CARLA's BasicAgent."""
+        desired_kmh = self.target_speed_mph * MPH_TO_KMH
+        if settings.OBEY_SPEED_LIMITS:
+            limit = self.ego.get_speed_limit()
+            if limit and limit > 0:
+                desired_kmh = min(desired_kmh, limit)
+        front = self.state.route_traveled_m + self.ego.bounding_box.extent.x
+        junction = next((j for j in self._route_junctions()
+                         if front - 0.5 < j["entry_m"] <= front + settings.INTERSECTION_LOOKAHEAD_METERS), None)
+        if junction is not None and not junction["signalized"]:
+            now = time.monotonic()
+            stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
+            desired_kmh = min(desired_kmh, settings.INTERSECTION_APPROACH_SPEED_MPH * MPH_TO_KMH)
+            stop_sign = settings.OBEY_STOP_SIGNS and junction["stop_m"] is not None
+            if stop_sign and not junction["stop_done"]:
+                to_line = junction["stop_m"] - front
+                desired_kmh = min(desired_kmh, max(3.0, math.sqrt(
+                    2.0 * settings.STOP_SIGN_DECELERATION_MPS2 * max(0.0, to_line)) * 3.6))
+                if to_line <= 1.0:
+                    if not stopped:
+                        self.state.waiting_for = "stop sign"
+                        return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+                    if junction["stopped_at"] is None:
+                        junction["stopped_at"] = now
+                        print("[carla] Stopped at a stop sign.")
+                    if now - junction["stopped_at"] < settings.STOP_SIGN_WAIT_SECONDS:
+                        self.state.waiting_for = "stop sign"
+                        return carla.VehicleControl(throttle=0.0, brake=1.0, hand_brake=True)
+                    junction["stop_done"] = True
+            if settings.YIELD_AT_INTERSECTIONS and not junction["cleared"] and \
+                    (not stop_sign or junction["stop_done"]):
+                to_entry = junction["entry_m"] - front
+                speed = self.state.speed_mps
+                if to_entry <= 3.0 + speed * speed / 6.0:      # can still stop before it at ~3 m/s2
+                    other = self._cross_traffic(junction)
+                    if other is None:
+                        junction["waiting_since"] = None
+                        if stopped or to_entry <= 3.5:
+                            junction["cleared"] = True          # committed: no second-guessing mid-crossing
+                    else:
+                        self.state.waiting_for = "cross traffic"
+                        if junction["waiting_since"] is None:
+                            junction["waiting_since"] = now
+                            print("[carla] Yielding to {} at an intersection.".format(_describe(other)))
+                        elif now - junction["waiting_since"] > settings.YIELD_MAX_WAIT_SECONDS:
+                            self._junction_asked = junction
+                            self.soft_stop("Intersection blocked by {}".format(_describe(other)))
+                        return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+        self.agent.set_target_speed(desired_kmh)
+        return None
+
+    def _cross_traffic(self, junction: Dict[str, Any]) -> Optional[Any]:
+        """A vehicle the AV must give way to at this intersection, or None."""
+        ego = self.ego.get_transform()
+        forward = ego.get_forward_vector()
+        center, radius = junction["center"], junction["radius"]
+        turning_left = junction["turn"] < -30.0
+        for vehicle in self.world.get_actors().filter("vehicle.*"):
+            if vehicle.id == self.ego.id or vehicle.id in self.scene_actor_ids:
+                continue   # placed obstacles are handled by the obstacle check
+            location = vehicle.get_location()
+            to_center = math.hypot(center.x - location.x, center.y - location.y)
+            if to_center > radius + settings.YIELD_WATCH_METERS:
+                continue
+            if (location.x - ego.location.x) * forward.x + (location.y - ego.location.y) * forward.y < -1.0:
+                continue   # behind us
+            velocity = vehicle.get_velocity()
+            speed = math.hypot(velocity.x, velocity.y)
+            along = velocity.x * forward.x + velocity.y * forward.y
+            if speed > 0.5 and along > 0.7 * speed:
+                continue   # going our way (ahead of us): BasicAgent keeps its distance
+            if speed > 0.5 and along < -0.7 * speed and not turning_left:
+                continue   # oncoming: only in our way when we turn left across its lane
+            if to_center <= radius:
+                return vehicle             # in the intersection
+            if speed < 1.0:
+                continue                   # waiting at its own stop line / light
+            closing = (velocity.x * (center.x - location.x) + velocity.y * (center.y - location.y)) / max(to_center, 0.1)
+            if closing > 0.5 * speed and (to_center - radius) / closing < settings.YIELD_GAP_SECONDS:
+                return vehicle             # arriving before we could be across
+        return None
 
     # =====================================================================
     # Commands
@@ -361,6 +520,9 @@ class CarlaSimulation(Simulation):
             self._replan_from_here()
         # Interrupted while pulling over at the route end: plan that pull-over again from here.
         self.route_finishing = False
+        if self._junction_asked is not None:    # the operator checked the blocked intersection: cross it
+            self._junction_asked["cleared"] = True
+            self._junction_asked = None
         self.mode = DrivingMode.AUTONOMOUS
         self.stop_reason = ""
 

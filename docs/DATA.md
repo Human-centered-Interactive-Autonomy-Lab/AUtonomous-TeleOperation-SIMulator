@@ -35,7 +35,8 @@ delayed command actually reached the vehicle), `decision_shown`,
 `task_triggered`, `speech`, `talk_start`/`talk_end`, `collision`,
 `manual_control_refused`, `map_zoom`, `status_changed`,
 `passenger_dropoff_started`/`passenger_dropoff_complete` (the passenger
-getting out at the end of the route), `route_complete`,
+getting out at the end of the route), `av_waiting`/`av_waiting_end` (the AV
+held by a traffic rule: `reason` is `stop sign` or `cross traffic`), `route_complete`,
 `task_error`, `scenario_end`, plus anything task scripts log.
 
 ## scenarios.csv
