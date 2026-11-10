@@ -298,7 +298,7 @@ class ScenarioSession:
             return False
         self.manual_control_active = True
         self.send_vehicle_command("manual_control", lambda: self.simulation.set_manual_control(True))
-        self.feedback("Manual control: W/A/S/D or arrow keys.")
+        # No pop-up here: "Manual: W A S D / arrow keys" stays in the Actions corner while active.
         return True
 
     def resume_autonomy(self) -> None:

@@ -531,7 +531,8 @@ class OperatorInterface:
 
     def _command_lines(self, action: actions.Action, width: int) -> List[str]:
         """A command's label wrapped to the row (at most three lines)."""
-        room = width - 24 - (self._switch_size()[0] + 10 if action.kind == "toggle" else 0)
+        room = width - 24 - (self._switch_size()[0] + 10 + self.fonts["small"].size("Off ")[0]
+                             if action.kind == "toggle" else 0)
         lines = self._wrap(action.label, "normal", room)
         if len(lines) > 3:
             lines = lines[:2] + [self._fit_text(" ".join(lines[2:]), "normal", room)]
@@ -545,13 +546,18 @@ class OperatorInterface:
         color = C["button_hover"] if hover else C["button"]
         pygame.draw.rect(self.screen, color if enabled else C["button_disabled"], rect,
                          border_radius=settings.CORNER_RADIUS)
+        pygame.draw.rect(self.screen, C["button_border"] if enabled else C["panel_border"], rect,
+                         settings.BUTTON_BORDER_WIDTH, border_radius=settings.CORNER_RADIUS)
         text_color = C["button_text"] if enabled else C["text_dim"]
         line = self.fonts["normal"].get_height()
         top = rect.centery - len(lines) * line // 2
         for index, text in enumerate(lines):
             self._blit_text(text, "normal", text_color, (rect.x + 12, top + index * line))
         if action.kind == "toggle":
-            self._switch((rect.right - 10, rect.centery), toggled, enabled)
+            switch = self._switch((rect.right - 10, rect.centery), toggled, enabled)
+            # The state in words too, not by color alone.
+            self._blit_text("On" if toggled else "Off", "small", text_color, (switch.x - 6, rect.centery),
+                            anchor="midright")
         elif action.action_id in ("emergency_services", "fleet_services"):   # opens a menu
             x, y, size = rect.right - 16, rect.centery, max(4, line // 4)
             pygame.draw.lines(self.screen, C["text_dim"], False,
@@ -568,7 +574,7 @@ class OperatorInterface:
         height = max(16, int(self.fonts["normal"].get_height() * 1.0))
         return int(height * 1.85), height
 
-    def _switch(self, midright: Tuple[int, int], on: bool, enabled: bool = True) -> None:
+    def _switch(self, midright: Tuple[int, int], on: bool, enabled: bool = True) -> Rect:
         """An on/off switch (pill track with a round knob)."""
         width, height = self._switch_size()
         track = Rect(0, 0, width, height)
@@ -578,6 +584,7 @@ class OperatorInterface:
         radius = height // 2 - 2
         knob_x = track.right - height // 2 if on else track.x + height // 2
         pygame.draw.circle(self.screen, C["switch_knob"], (knob_x, track.centery), radius)
+        return track
 
     # =====================================================================
     # Overlays
@@ -631,9 +638,9 @@ class OperatorInterface:
         else:
             notices = []
             if session.manual_control_active:
-                notices.append(("Manual: W A S D / arrow keys", C["badge_warning"]))
+                notices.append(("Manual: WASD / arrow keys", C["badge_warning"]))
             if session.talking_to:
-                notices.append(("Talking to {}".format("the passenger" if session.talking_to == "passenger"
+                notices.append(("Talking to {}".format("passenger" if session.talking_to == "passenger"
                                                        else "people outside"), C["badge_normal"]))
             right = slot.right
             for text, color in notices:               # right to left, as many as fit
@@ -811,8 +818,9 @@ class OperatorInterface:
         if hover and style in ("yes", "no", "toggled"):     # no separate hover color: lighten
             color = tuple(min(255, channel + 25) for channel in color)
         pygame.draw.rect(self.screen, color, rect, border_radius=radius)
-        if style in ("normal", "link") and enabled:
-            pygame.draw.rect(self.screen, C["button_border"], rect, 1, border_radius=radius)
+        if style in ("normal", "link"):
+            pygame.draw.rect(self.screen, C["button_border"] if enabled else C["panel_border"], rect,
+                             settings.BUTTON_BORDER_WIDTH, border_radius=radius)
         if style in ("estop", "toggled") and enabled:     # emergency stop / switched on: white ring
             pygame.draw.rect(self.screen, (255, 255, 255), rect.inflate(-6, -6), 2, border_radius=radius - 2)
         on_color = style not in ("normal", "link")          # red / orange / green buttons

@@ -47,8 +47,10 @@ to open one. To hide a button in a single scenario, put its id in that
 scenario's `hidden_buttons` column.
 
 In the command list every entry is a button; one with `kind="toggle"` (and an
-`is_on` function) shows an on/off switch, like Hazard lights. The color theme
-(`THEME = "blue"`, `"light"` or `"dark"`; colors in `_THEMES`), the font
+`is_on` function) shows an on/off switch (with "On"/"Off"), like Hazard
+lights. The color theme (`THEME = "high_contrast"` by default, or `"blue"`,
+`"light"`, `"dark"`; colors in `_THEMES`; every theme is checked against the
+WCAG AA contrast levels by `tests/test_colors.py`), the font
 family (`FONT_FAMILIES`) and the corner rounding (`CORNER_RADIUS`) are in the
 interface section of `settings.py`. Pop-up messages (notifications and action
 feedback) appear in the top-right corner of the Actions panel.
