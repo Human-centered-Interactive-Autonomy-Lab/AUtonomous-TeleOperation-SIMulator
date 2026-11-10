@@ -20,8 +20,8 @@ Groups (where the button is drawn):
 
 Styles: "normal", "danger" (red), "estop" (red oval), "primary" (orange),
         "link" (text-like).
-Kinds:  "click" (default), "toggle" (shows on/off), "hold" (push-to-talk:
-        handler runs on press, ``release`` handler on release).
+Kinds:  "click" (default), "toggle" (shows on/off), "hold" (handler runs
+        on press, ``release`` handler on release; not used by default).
 """
 
 from typing import Callable, Dict, List, Optional, Tuple
@@ -115,10 +115,11 @@ def _hazard_lights(session) -> None:
     session.feedback("Hazard lights {}.".format("on" if turn_on else "off"))
 
 
-def _return_to_depot(session) -> None:
-    session.return_to_depot = not session.return_to_depot
-    session.record_action("return_to_depot", on=session.return_to_depot)
-    session.feedback("Return to depot after this job: {}.".format("yes" if session.return_to_depot else "no"))
+def _wait_for_fleet(session) -> None:
+    session.wait_for_fleet = not session.wait_for_fleet
+    session.record_action("wait_for_fleet", on=session.wait_for_fleet)
+    session.feedback("After this job: {}.".format(
+        "pull over and wait for fleet assistance" if session.wait_for_fleet else "pick up the next passenger"))
 
 
 def _open(dialog_name: str, action_id: str) -> Handler:
@@ -128,15 +129,18 @@ def _open(dialog_name: str, action_id: str) -> Handler:
     return handler
 
 
-def _talk_start(who: str) -> Handler:
+def _talk_toggle(who: str) -> Handler:
+    """Click to start talking, click again to stop (switching partner ends the first talk)."""
     def handler(session) -> None:
+        if session.talking_to == who:
+            session.record_action("talk_stop", to=who)
+            session.stop_talking()
+            return
+        if session.talking_to:
+            session.stop_talking()
         session.record_action("talk_to_" + who)
         session.start_talking(who)
     return handler
-
-
-def _talk_stop(session) -> None:
-    session.stop_talking()
 
 
 def _call(partner: str) -> Handler:
@@ -215,15 +219,15 @@ ACTIONS: List[Action] = [
     # --- command list (Actions panel, left) ---------------------------------
     Action("emergency_services", "Emergency services", "actions", _open("contacts", "emergency_services"), "link"),
     Action("fleet_services", "Fleet services", "actions", _open("fleet", "fleet_services"), "link"),
-    Action("talk_to_passenger", "Talk to passenger (hold)", "actions", _talk_start("passenger"), "link",
-           kind="hold", release=_talk_stop),
-    Action("talk_externally", "Talk externally (hold)", "actions", _talk_start("external"), "link",
-           kind="hold", release=_talk_stop),
+    Action("talk_to_passenger", "Talk to passenger", "actions", _talk_toggle("passenger"), "link",
+           kind="toggle", is_on=lambda s: s.talking_to == "passenger"),
+    Action("talk_externally", "Talk externally", "actions", _talk_toggle("external"), "link",
+           kind="toggle", is_on=lambda s: s.talking_to == "external"),
     Action("honk", "Honk", "actions", _honk, "link"),
     Action("hazard_lights", "Hazard lights", "actions", _hazard_lights, "link", kind="toggle",
            is_on=lambda s: s.hazard_lights_on),
-    Action("return_to_depot", "Return to depot after this job", "actions", _return_to_depot, "link",
-           kind="toggle", is_on=lambda s: s.return_to_depot),
+    Action("wait_for_fleet", "Pull over and wait for fleet assistance after this job", "actions",
+           _wait_for_fleet, "link", kind="toggle", is_on=lambda s: s.wait_for_fleet),
     # --- driving (Actions panel, right) -------------------------------------
     Action("emergency_stop", "E-STOP", "drive", _emergency_stop, "estop"),
     Action("pull_over", "Pull Over", "drive", _pull_over, "primary"),

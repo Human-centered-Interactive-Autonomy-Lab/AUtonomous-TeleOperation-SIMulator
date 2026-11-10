@@ -139,6 +139,7 @@ class CarlaSimulation(Simulation):
         self.manual_input = (0.0, 0.0, settings.MANUAL_COAST_BRAKE, False)
         self.pull_over_end_m = 0.0
         self.route_finishing = False
+        self.curb_after_m: Optional[float] = None   # pulling over: steer to the curb only past this (an intersection)
         self.passenger_dropped = False              # the route-end drop-off has happened
         self.passenger_look = ""                    # pedestrian blueprint of the passenger on board ("" = any)
         self.dropoff: Optional[Dict[str, Any]] = None   # the passenger getting out, while it lasts
@@ -215,6 +216,7 @@ class CarlaSimulation(Simulation):
         self._yielding = False
         self.lane_return_at_m = None
         self.route_finishing = False
+        self.curb_after_m = None
         self.passenger_dropped = False
         self.passenger_look = ""
         self.dropoff = None
@@ -332,6 +334,14 @@ class CarlaSimulation(Simulation):
                     else:
                         self.mode = DrivingMode.PULLED_OVER
                 return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+            if self.curb_after_m is not None:     # an intersection first: cross it like normal driving
+                if self.state.route_traveled_m >= self.curb_after_m:
+                    self.curb_after_m = None
+                    self._steer_to_curb()
+                else:
+                    held = self._traffic_rules()
+                    if held is not None:
+                        return held
             # Moving toward the curb: still wait for pedestrians crossing in front.
             if self._tick_count % OBSTACLE_CHECK_EVERY_TICKS == 0:
                 self._yielding = self._scan_path()[1]
@@ -425,7 +435,8 @@ class CarlaSimulation(Simulation):
                     if entry_m - 25.0 <= zone_m <= entry_m + 1.0 and abs(lateral) < 4.0 and abs(heading) < 45.0:
                         stop_m = entry_m - settings.STOP_LINE_SETBACK_METERS
                         break
-            junctions.append({"entry_m": entry_m, "center": center, "radius": radius,
+            exit_m = route.cumulative[index] if index < len(waypoints) else route.end_distance
+            junctions.append({"entry_m": entry_m, "exit_m": exit_m, "center": center, "radius": radius,
                               "turn": _yaw_change(before, after), "signalized": signalized, "stop_m": stop_m,
                               "stopped_at": None, "stop_done": False, "cleared": False, "waiting_since": None})
         self._junctions, self._junctions_route = junctions, route
@@ -533,6 +544,7 @@ class CarlaSimulation(Simulation):
             self._replan_from_here()
         # Interrupted while pulling over at the route end: plan that pull-over again from here.
         self.route_finishing = False
+        self.curb_after_m = None
         if self._junction_asked is not None:    # the operator checked the blocked intersection: cross it
             self._junction_asked["cleared"] = True
             self._junction_asked = None
@@ -549,8 +561,22 @@ class CarlaSimulation(Simulation):
     def pull_over(self) -> None:
         if self.ego is None:
             return
-        self._steer_to_curb()
-        self.pull_over_end_m = self.state.route_traveled_m + settings.PULL_OVER_DISTANCE_METERS
+        traveled, half_length = self.state.route_traveled_m, self.ego.bounding_box.extent.x
+        self.pull_over_end_m = traveled + settings.PULL_OVER_DISTANCE_METERS
+        self.curb_after_m = None
+        # Never stop in (or drift to the curb inside) an intersection: if one lies in
+        # the stretch ahead, or the car is in one, drive through it normally first.
+        for junction in self._route_junctions():
+            if junction["exit_m"] <= traveled - half_length:
+                continue                                  # already behind us
+            if junction["entry_m"] > self.pull_over_end_m + half_length:
+                break                                     # beyond where we will stop
+            self.curb_after_m = junction["exit_m"] + half_length
+            self.pull_over_end_m = junction["exit_m"] + settings.PULL_OVER_DISTANCE_METERS
+        if self.curb_after_m is None:
+            self._steer_to_curb()
+        else:
+            print("[carla] Pulling over after the intersection ahead.")
         if self.agent.done():                    # nothing left to follow: just stop
             self._replan_from_here(settings.PULL_OVER_DISTANCE_METERS + 10)
         self.mode = DrivingMode.PULLING_OVER
@@ -558,6 +584,7 @@ class CarlaSimulation(Simulation):
     def _pull_over_at_route_end(self) -> None:
         """Pull over so the car stops at the curb where the route ends."""
         self.route_finishing = True
+        self.curb_after_m = None          # only called past the last intersection
         self._steer_to_curb()
         self.pull_over_end_m = self.route.end_distance
         self.mode = DrivingMode.PULLING_OVER
@@ -643,6 +670,7 @@ class CarlaSimulation(Simulation):
         self.route_index = 0
         self.lane_return_at_m = None
         self.route_finishing = False
+        self.curb_after_m = None
         self.agent.set_offset(0.0)
         self.agent.set_target_speed(self.target_speed_mph * MPH_TO_KMH)
         self._set_agent_plan(self.route.waypoints)

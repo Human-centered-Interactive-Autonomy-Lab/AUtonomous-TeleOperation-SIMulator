@@ -71,3 +71,10 @@ def test_schedule_orders_and_never_loops_forever():
     assert sorted(shuffled[:5]) == items and sorted(shuffled[5:]) == items
     with_replacement = build_schedule(items, "random", 50, True, rng)
     assert len(with_replacement) == 50 and set(with_replacement) <= set(items)
+
+
+def test_route_end_fleet_and_old_depot_name(tmp_path):
+    path = write_csv(tmp_path, "scenario_id,route_end\na,fleet\nb,depot\nc,\n")
+    assert [s.route_end for s in load_scenarios(path)] == ["fleet", "fleet", "customer"]
+    with pytest.raises(ScenarioFileError):
+        load_scenarios(write_csv(tmp_path, "scenario_id,route_end\na,garage\n"))

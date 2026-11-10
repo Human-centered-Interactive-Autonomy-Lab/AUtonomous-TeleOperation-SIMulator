@@ -149,8 +149,9 @@ AUTOSIM is under active development. Known limitations:
   stops for vehicles and red lights, and AUTOSIM adds stops for props and
   pedestrians in the lane. It is not a production-grade planner.
 * Hazard lights use CARLA's left and right blinker lights.
-* "Talk to passenger / externally" is push-to-talk with scripted replies
-  (text and/or pre-recorded audio). There is no live voice link.
+* "Talk to passenger / externally" is a toggle (click to start, click again
+  to stop) with scripted replies (text and/or pre-recorded audio). There is
+  no live voice link.
 
 ## License
 

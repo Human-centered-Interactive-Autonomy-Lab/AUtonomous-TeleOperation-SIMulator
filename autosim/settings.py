@@ -261,6 +261,8 @@ SOFT_STOP_BRAKE: float = 0.5
 EMERGENCY_STOP_BRAKE: float = 1.0
 
 # Pull over: drive slowly this far ahead while shifting to the road edge.
+# Never inside an intersection: with one in that stretch, the AV crosses it
+# first (normal rules) and stops this far past it.
 PULL_OVER_SPEED_MPH: float = 6.0
 PULL_OVER_DISTANCE_METERS: float = 18.0
 PULL_OVER_EDGE_MARGIN_METERS: float = 0.4    # gap kept to the lane edge
@@ -298,8 +300,9 @@ STOPPED_SPEED_MPH: float = 0.5
 # After a drop-off the AV picks up the next passenger: it waits a moment,
 # drives on for a random distance, pulls over where a pedestrian is waiting
 # beside the road, the passenger gets in, and it drives them to their
-# destination, where they are dropped off and the cycle repeats.  This does
-# not happen when "Return to depot after this job" is on.
+# destination, where they are dropped off and the cycle repeats.  With "Pull
+# over and wait for fleet assistance after this job" on, the AV instead stays
+# pulled over (hazard lights on) after the drop-off.
 PICK_UP_NEXT_PASSENGER: bool = True
 NEXT_PICKUP_DELAY_SECONDS: float = 5.0          # parked after the drop-off before driving on
 NEXT_PICKUP_MIN_METERS: float = 150.0           # drive this far (random between min and max)
@@ -307,14 +310,16 @@ NEXT_PICKUP_MAX_METERS: float = 300.0           #   before reaching the waiting 
 NEXT_TRIP_LENGTH_METERS: float = 400.0          # pickup to drop-off
 PASSENGER_BOARDING_TIMEOUT_SECONDS: float = 15.0   # passenger is in the car after this at the latest
 
-# Alerts shown while a passenger gets out / in.
+# Alerts shown while a passenger gets out / in, and while waiting for the fleet.
 PASSENGER_DROPOFF_ALERT_TEXT: str = "Passenger is getting out"
 PASSENGER_PICKUP_ALERT_TEXT: str = "Passenger is getting in"
+FLEET_ASSISTANCE_ALERT_TEXT: str = "Pulled over, waiting for fleet assistance"
 
 # Text shown in the Route panel after the route is completed, and on the way
 # to the next pickup.
 ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT: str = "Route complete. Picking up next passenger."
-ROUTE_COMPLETE_DEPOT_TEXT: str = "Route complete. Returning to depot."
+ROUTE_COMPLETE_FLEET_TEXT: str = "Route complete. Waiting for fleet assistance."
+ROUTE_COMPLETE_TEXT: str = "Route complete."     # PICK_UP_NEXT_PASSENGER off
 ROUTE_TO_PICKUP_TEXT: str = "Driving to pick up the next passenger."
 
 

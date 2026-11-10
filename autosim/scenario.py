@@ -19,7 +19,8 @@ The full column reference is in docs/SCENARIOS.md.  In short:
   lights             Street lights: auto / off / low / high.
   target_speed_mph   Cruising speed of the automated vehicle.
   start_stopped      yes = the car is standing still when the scenario starts.
-  route_end          customer / depot -- after the drop-off: pick up the next passenger, or stay parked.
+  route_end          customer / fleet -- after the drop-off: pick up the next passenger, or stay
+                     pulled over and wait for fleet assistance ("depot" is read as "fleet").
   alerts             Alerts shown at start, separated by "|".  Prefix with
                      "critical:", "warning:" or "info:" to set the severity.
   hidden_buttons     Action buttons to hide, separated by "|" (e.g. honk|talk_externally).
@@ -272,9 +273,9 @@ def _scenario_from_row(
             problems.append("{}: target_speed_mph must be a number".format(where))
     scenario.start_stopped = cell("start_stopped").lower() in _TRUE_WORDS
     if cell("route_end"):
-        route_end = cell("route_end").lower()
-        if route_end not in ("customer", "depot"):
-            problems.append("{}: route_end must be 'customer' or 'depot'".format(where))
+        route_end = {"depot": "fleet"}.get(cell("route_end").lower(), cell("route_end").lower())
+        if route_end not in ("customer", "fleet"):
+            problems.append("{}: route_end must be 'customer' or 'fleet'".format(where))
         else:
             scenario.route_end = route_end
 
