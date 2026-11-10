@@ -1,0 +1,206 @@
+==========================================================================
+AUTOSIM WORK LOG - 2026-10-23
+Project: AUTOSIM (AUtonomous TeleOperation SIMulator)
+Repo: https://github.com/Human-centered-Interactive-Autonomy-Lab/AUtonomous-TeleOperation-SIMulator
+Local folder: C:\Carla\AUtonomous-TeleOperation-SIMulator
+Setup: Windows, Python 3.10.11, CARLA 0.9.15 (packaged)
+Branch: fix/route-start-pose
+==========================================================================
+
+SUMMARY
+-------
+- Fixed "NOT CONNECTED TO CARLA" (missing carla Python package).
+- Fixed the AV starting off its route and crashing on Resume AV.
+- Fixed the AV turning sharply and crashing on Resume AV after manual control.
+- Found that the AV ignores stop signs and does not yield (not fixed yet).
+- Set up per-repo git identity so commits show under my GitHub account.
+- Pushed the fixes to branch fix/route-start-pose (commit 77b0c15).
+
+
+--------------------------------------------------------------------------
+1. GUI SAYS "NOT CONNECTED TO CARLA" WHILE CARLA IS RUNNING
+--------------------------------------------------------------------------
+Symptom:
+  CARLA was open, but AUTOSIM showed "NOT CONNECTED TO CARLA", black
+  cameras, and buttons that did nothing.
+
+Cause:
+  The carla Python package was not installed in the Python that runs
+  AUTOSIM. AUTOSIM shows the same "not connected" message for any
+  connection failure. The real reason is printed in the terminal just
+  above the line "[experiment] WARNING: no connection to CARLA".
+
+  The three possible failures (autosim/simulation_carla.py, connect()):
+    a) carla package not installed           <- this was our problem
+    b) networkx / shapely missing (navigation agents fail to load)
+    c) server does not answer at 127.0.0.1:2000 within 30 s
+       (CARLA still loading, wrong port, firewall, CARLA on another machine)
+
+How to check:
+  python --version
+  python -c "import carla; print(carla.__file__)"
+  -> We got "ModuleNotFoundError: No module named 'carla'".
+
+Fix:
+  python -m pip install carla==0.9.15
+  python -m pip install -r requirements.txt
+  python -c "import carla; print(carla.__file__)"   (now prints a path)
+
+Notes:
+  - Use "python -m pip", not plain "pip", so the package installs into
+    the same Python that runs AUTOSIM.
+  - The carla package version must match the CARLA server version.
+  - The README says the Windows wheel targets Python 3.7. That is only
+    true of the wheel shipped inside the CARLA folder. PyPI has Windows
+    packages for Python 3.7, 3.8, 3.9 and 3.10, so 3.10 works.
+  - Success looks like this in the terminal:
+    [carla] Connected to CARLA 0.9.15 at 127.0.0.1:2000.
+
+Run command:
+  python -m autosim --scenarios scenarios/example_battery.csv --participant TEST
+  (Start CARLA first and wait until the map has fully loaded.)
+
+
+--------------------------------------------------------------------------
+2. AV DOES NOT FOLLOW THE ROUTE / CRASHES INTO A TREE ON RESUME AV
+--------------------------------------------------------------------------
+Symptom:
+  The route drawn on the map did not match where the car was. The car
+  started off in the wrong direction. On Resume AV it left the road and
+  crashed into a tree.
+
+Cause:
+  CARLA reports a newly spawned car at location (0, 0, 0) facing yaw 0
+  until the simulation has advanced one tick. AUTOSIM planned the route
+  immediately after spawning the car, so:
+    - the route started at the road nearest the map origin, not at the car
+    - the starting push went along the map's x-axis, not along the lane
+    - the AV drove off the road trying to reach the misplaced route
+  Obstacles placed relative to the route were misplaced for the same reason.
+
+Fix (autosim/simulation_carla.py, _spawn_ego, around line 562):
+  After these lines:
+        self.ego = ego
+        self.spawned.append(ego)
+  add:
+        self.world.wait_for_tick()
+
+Result: confirmed working. The route starts under the car and the AV
+follows it.
+
+
+--------------------------------------------------------------------------
+3. AV TURNS SHARPLY AND CRASHES ON RESUME AV AFTER MANUAL CONTROL
+--------------------------------------------------------------------------
+Symptom:
+  After driving in Manual Control and pressing Resume AV, the car made
+  a sharp right turn and crashed instead of continuing on its route.
+
+Cause:
+  The self-driving agent keeps a list of upcoming road points to steer
+  toward. That list is not updated during manual driving. Resume AV
+  sends two steps (autosim/session.py, resume_autonomy):
+    1) turn manual control off  -> car goes to the "holding" state
+    2) resume autonomy          -> rebuilds the list only if the car is
+                                   still in manual mode
+  By step 2 the car is no longer in manual mode, so the list was never
+  rebuilt. The agent steered toward old points behind or beside the car.
+
+Fix (autosim/simulation_carla.py, set_manual_control, around line 406):
+        elif self.mode == DrivingMode.MANUAL:
+            self.mode = DrivingMode.HOLDING
+            self._replan_from_here()          <- added
+
+Expected behavior:
+  The car continues from the nearest point on its original route. If
+  you changed lanes manually, it merges back into the route's lane on
+  its own.
+
+
+--------------------------------------------------------------------------
+4. AV IGNORES STOP SIGNS AND DOES NOT YIELD  (OPEN, NOT FIXED)
+--------------------------------------------------------------------------
+Symptom:
+  In autonomous mode the car drives through stop signs and does not
+  yield at intersections.
+
+Cause:
+  Not a bug in our changes. AUTOSIM drives the car with CARLA's built-in
+  BasicAgent (autosim/third_party/carla_agents/). Its own description
+  says it "respects traffic lights and other vehicles, but ignores stop
+  signs". It has an ignore_stop_signs setting, but nothing reads it.
+  CARLA's BehaviorAgent does not handle stop signs either.
+
+  What the AV handles now:
+    Traffic lights ............................ yes
+    Car directly ahead in its lane ............ yes
+    Pedestrians in its lane ................... yes (AUTOSIM adds this)
+    Stop signs ................................ NO
+    Yielding / right of way at junctions ...... NO
+
+Possible fix (to add in autosim/simulation_carla.py):
+  a) Stop signs (simpler): find the stop zone ahead on the route, stop
+     fully, wait a few seconds, then go.
+  b) Yielding (harder): before entering a junction, check for cars
+     coming from other directions and wait for a gap.
+  Add on/off switches in settings.py.
+
+Decision needed:
+  Should the AV always obey these rules, or should each scenario be
+  able to turn them off (e.g. a CSV column), so the AV can break a
+  rule on purpose for the operator to catch? Suggested default: stop
+  signs on, with a switch to turn them off.
+
+
+--------------------------------------------------------------------------
+5. GIT / GITHUB
+--------------------------------------------------------------------------
+Pushing the fixes:
+  git status                     (check what changed; leave out .patch files)
+  git switch -c fix/route-start-pose
+  git add autosim/simulation_carla.py
+  git commit -m "Fix AV route start and resume after manual control"
+  git push -u origin fix/route-start-pose
+  -> Pushed as commit 77b0c15. Not merged into main; open a pull
+     request on GitHub when ready.
+
+Problem: the commit showed up as another user (alliepv).
+Cause: git on the shared computer was set up with someone else's name
+and email. GitHub links commits to accounts by email.
+Fix (this repo only, does not change other people's setup):
+  git config user.name "Your Name"
+  git config user.email "email-on-your-github-account"
+  To fix a commit you already pushed (only on your own branch):
+  git commit --amend --reset-author --no-edit
+  git push --force-with-lease
+  (--force-with-lease overwrites the branch only if nobody else has
+  pushed to it since you last pulled; plain --force would erase their work.)
+Also: Windows Credential Manager may hold someone else's GitHub login.
+Remove the "git:https://github.com" entry to sign in as yourself.
+
+Claude Code cloud session (claude.ai/code):
+  - Runs in a temporary cloud container, not on my computer. Files there
+    are deleted when the session ends.
+  - It can read the public repo but cannot push. GitHub is not linked to
+    my Claude account because the GitHub connector is not enabled for
+    our Claude organization.
+  - Waiting on the admin to enable GitHub. Then link it at
+    https://claude.ai/connect-github and install the Claude GitHub App
+    on the lab's GitHub organization.
+  - Until then: Claude provides patch files; apply them with
+    "git apply <file>.patch" or edit the file by hand.
+
+
+--------------------------------------------------------------------------
+TODO / NEXT TIME
+--------------------------------------------------------------------------
+[*] Test Resume AV after manual control with the fix (#3).
+[ ] Decide on stop-sign / yielding behavior (#4), then implement it.
+[ ] Fix README: Python 3.7-3.10 note, use "python -m pip" (separate commit).
+[ ] Improve the "NOT CONNECTED TO CARLA" message to show the real reason.
+[ ] Open a pull request for fix/route-start-pose.
+[ ] Follow up with the admin about enabling GitHub for Claude.
+[ ] Fix pop-up message by action buttons to appear next to the actions
+[ ] Ensure that the "Return to Depot After This Job" button works
+[ ] Fix any more bugs and errors
+==========================================================================
