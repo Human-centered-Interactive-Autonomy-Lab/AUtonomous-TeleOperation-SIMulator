@@ -414,12 +414,6 @@ class OperatorInterface:
         pygame.draw.rect(shade, (0, 0, 0, 150), shade.get_rect(), border_radius=background.height // 2)
         self.screen.blit(shade, background.topleft)
         self.screen.blit(label_surface, (background.x + 8, background.y + 3))
-        if panel_name == "camera_front" and session.manual_control_active:
-            self._badge("Manual control - W A S D / arrow keys", C["badge_warning"],
-                        (area.centerx, area.bottom - 8), anchor="midbottom")
-        if panel_name == "camera_front" and session.talking_to:
-            text = "Talking to {}".format("the passenger" if session.talking_to == "passenger" else "people outside")
-            self._badge(text, C["badge_normal"], (area.centerx, area.y + 8), anchor="midtop")
 
     def _draw_map(self, rect: Rect, session: ScenarioSession) -> None:
         content = self._panel(rect, settings.PANEL_TITLES.get("map"))
@@ -592,7 +586,8 @@ class OperatorInterface:
     def _draw_messages(self, session: ScenarioSession) -> None:
         """Pop-up messages in the top-right corner of the Actions panel, beside its title:
         the newest of the notification banner (click to open it) and the feedback to
-        the operator's last action (fades out)."""
+        the operator's last action (fades out).  Otherwise the ongoing states that
+        need the operator's attention (manual control, talking) are shown there."""
         panel = self.panels.get("actions", self.screen.get_rect())
         title_width = self.fonts["title"].size(settings.PANEL_TITLES.get("actions", ""))[0]
         slot = Rect(panel.x + 12 + title_width + 16, panel.y + 6, 0, self.fonts["title"].get_height() + 4)
@@ -633,6 +628,23 @@ class OperatorInterface:
             surface.set_alpha(int(255 * opacity))
             toast.blit(surface, surface.get_rect(center=toast.get_rect().center))
             self.screen.blit(toast, box.topleft)
+        else:
+            notices = []
+            if session.manual_control_active:
+                notices.append(("Manual: W A S D / arrow keys", C["badge_warning"]))
+            if session.talking_to:
+                notices.append(("Talking to {}".format("the passenger" if session.talking_to == "passenger"
+                                                       else "people outside"), C["badge_normal"]))
+            right = slot.right
+            for text, color in notices:               # right to left, as many as fit
+                surface = self._text(text, "small", C["text_on_color"])
+                box = Rect(0, 0, surface.get_width() + 20, slot.height)
+                box.topright = (right, slot.y)
+                if box.x < slot.x:
+                    break
+                pygame.draw.rect(self.screen, color, box, border_radius=box.height // 2)
+                self.screen.blit(surface, surface.get_rect(center=box.center))
+                right = box.x - 6
 
     def _overlay_box(self, width_fraction: float, height_lines: int, anchor_panel: str = "status") -> Rect:
         """Rectangle for a dialog, placed over the given panel column (not the front camera)."""
