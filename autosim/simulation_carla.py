@@ -140,6 +140,7 @@ class CarlaSimulation(Simulation):
         self.pull_over_end_m = 0.0
         self.route_finishing = False
         self.passenger_dropped = False              # the route-end drop-off has happened
+        self.passenger_look = ""                    # pedestrian blueprint of the passenger on board ("" = any)
         self.dropoff: Optional[Dict[str, Any]] = None   # the passenger getting out, while it lasts
         self.route_end_action = "dropoff"           # what happens where the route ends: "dropoff" / "pickup"
         self.pickup: Optional[Dict[str, Any]] = None    # the next passenger, waiting or getting in
@@ -215,6 +216,7 @@ class CarlaSimulation(Simulation):
         self.lane_return_at_m = None
         self.route_finishing = False
         self.passenger_dropped = False
+        self.passenger_look = ""
         self.dropoff = None
         self.route_end_action = "dropoff"
         self.pickup = None
@@ -983,7 +985,7 @@ class CarlaSimulation(Simulation):
         self.passenger_dropped = True
         transform = self.ego.get_transform()
         forward, right = transform.get_forward_vector(), transform.get_right_vector()
-        blueprint = self._passenger_blueprint()
+        blueprint = self._passenger_blueprint(self.passenger_look)
         walker, door = None, None
         for gap in (0.5, 1.0, 1.5):     # beside the rear door; further out if something is in the way
             door = self._beside_rear_door(gap, SPAWN_HEIGHT["walker"])
@@ -998,11 +1000,15 @@ class CarlaSimulation(Simulation):
         self._set_passenger_door(True)
         self.dropoff = {"walker": walker, "path": self._passenger_path(door, forward, right),
                         "started": time.monotonic(), "door_open": True}
-        print("[carla] Passenger getting out.")
+        print("[carla] Passenger getting out ({}).".format(walker.type_id))
         return True
 
-    def _passenger_blueprint(self):
-        blueprint = random.choice(self.world.get_blueprint_library().filter("walker.pedestrian.*"))
+    def _passenger_blueprint(self, look: str = ""):
+        """The pedestrian blueprint ``look`` (so a passenger looks the same getting in and out), else a random one."""
+        library = self.world.get_blueprint_library()
+        blueprint = _find_blueprint(library, look) if look else None
+        if blueprint is None:
+            blueprint = random.choice(library.filter("walker.pedestrian.*"))
         if blueprint.has_attribute("is_invincible"):
             blueprint.set_attribute("is_invincible", "false")
         return blueprint
@@ -1107,7 +1113,8 @@ class CarlaSimulation(Simulation):
     def _start_boarding(self) -> None:
         """Stopped at the pickup point: the waiting passenger walks to the rear door and gets in."""
         pickup = self.pickup
-        if pickup is None:
+        if pickup is None:               # nobody could be placed: an unseen passenger gets in
+            self.passenger_look = ""
             self._start_destination_leg()
             return
         if not pickup["boarding"]:
@@ -1127,10 +1134,11 @@ class CarlaSimulation(Simulation):
         if not arrived and time.monotonic() - pickup["started"] < settings.PASSENGER_BOARDING_TIMEOUT_SECONDS:
             return
         self.pickup = None
+        self.passenger_look = walker.type_id   # the same person gets out at the destination
         self.walker_progress.pop(walker.id, None)
         self.destroy_actor(walker)
         self._set_passenger_door(False)
-        print("[carla] Passenger on board.")
+        print("[carla] Passenger on board ({}).".format(walker.type_id))
         if self.mode == DrivingMode.PICKING_UP:   # otherwise the operator has taken over; Resume AV continues
             self._start_destination_leg()
 
