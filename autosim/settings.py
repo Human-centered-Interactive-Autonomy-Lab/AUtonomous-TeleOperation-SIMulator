@@ -457,11 +457,12 @@ _COMMON_COLORS: Dict[str, Tuple[int, int, int]] = {
     "overlay_shade":     (0, 0, 0),
 }
 
-# Color themes; pick one with THEME.  "high_contrast" (default) is made so that
-# every operator can see every button and read every label: text and controls
-# meet the WCAG AA contrast levels (checked by tests/test_colors.py), and on/off
-# states are also written out, not shown by color alone.
-THEME: str = "high_contrast"      # "high_contrast", "blue", "light" or "dark"
+# Color themes; pick one with THEME.  "blue" (default) follows the lab's
+# mockup; "high_contrast" is dark text on white.  Every theme lets every
+# operator see every button and read every label: text and controls meet the
+# WCAG AA contrast levels (checked by tests/test_colors.py), and on/off states
+# are also written out, not shown by color alone.
+THEME: str = "blue"      # "high_contrast", "blue", "light" or "dark"
 
 _THEMES: Dict[str, Dict[str, Tuple[int, int, int]]] = {
     "high_contrast": {

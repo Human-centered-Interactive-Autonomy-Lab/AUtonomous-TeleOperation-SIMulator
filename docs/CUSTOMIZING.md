@@ -48,7 +48,7 @@ scenario's `hidden_buttons` column.
 
 In the command list every entry is a button; one with `kind="toggle"` (and an
 `is_on` function) shows an on/off switch (with "On"/"Off"), like Hazard
-lights. The color theme (`THEME = "high_contrast"` by default, or `"blue"`,
+lights. The color theme (`THEME = "blue"` by default, or `"high_contrast"`,
 `"light"`, `"dark"`; colors in `_THEMES`; every theme is checked against the
 WCAG AA contrast levels by `tests/test_colors.py`), the font
 family (`FONT_FAMILIES`) and the corner rounding (`CORNER_RADIUS`) are in the
