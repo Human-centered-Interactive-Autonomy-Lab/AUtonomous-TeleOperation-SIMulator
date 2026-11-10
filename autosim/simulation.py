@@ -28,6 +28,7 @@ class DrivingMode:
     PULLING_OVER = "pulling_over"
     PULLED_OVER = "pulled_over"
     DROPPING_OFF = "dropping_off"      # stopped at the route end, passenger getting out
+    PICKING_UP = "picking_up"          # stopped at a pickup point, passenger getting in
     MANUAL = "manual"                  # operator drives with the keyboard
     ROUTE_COMPLETE = "route_complete"
     OFFLINE = "offline"                # no connection to the simulator
@@ -41,6 +42,7 @@ class DrivingMode:
         PULLING_OVER: "Pulling over...",
         PULLED_OVER: "Pulled over",
         DROPPING_OFF: "Passenger exiting",
+        PICKING_UP: "Passenger boarding",
         MANUAL: "Manual control",
         ROUTE_COMPLETE: "Route complete",
         OFFLINE: "NOT CONNECTED TO CARLA",
@@ -66,6 +68,7 @@ class VehicleState:
         self.last_collision_with: str = ""       # type of the actor hit last
         self.lane_id: int = 0
         self.stop_reason: str = ""               # why the AV stopped by itself, if it did
+        self.trip_leg: str = "destination"       # "destination" (passenger on board) or "pickup"
 
     @property
     def speed_mph(self) -> float:
@@ -163,6 +166,12 @@ class Simulation:
 
     def reroute(self, alternate_index: int) -> bool:
         """Follow the scene's alternate route (0-based).  False if it does not exist."""
+        raise NotImplementedError
+
+    def start_next_trip(self, pickup_after_m: float, trip_length_m: float) -> bool:
+        """After the route is complete: drive on ``pickup_after_m``, pick up a
+        waiting passenger, then drive them ``trip_length_m`` to their drop-off.
+        False if the vehicle cannot start a trip now."""
         raise NotImplementedError
 
     def set_manual_control(self, enabled: bool) -> None:
@@ -275,6 +284,9 @@ class OfflineSimulation(Simulation):
         return False
 
     def reroute(self, alternate_index: int) -> bool:
+        return False
+
+    def start_next_trip(self, pickup_after_m: float, trip_length_m: float) -> bool:
         return False
 
     def set_manual_control(self, enabled: bool) -> None:

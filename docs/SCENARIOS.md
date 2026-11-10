@@ -41,7 +41,7 @@ python -m autosim --scenarios path/to/my_battery.csv
 | `lights`           | street lights: `auto` (on at night), `off`, `low`, `high`        | `auto`             |
 | `target_speed_mph` | cruising speed of the automated vehicle                          | 20                 |
 | `start_stopped`    | `yes` = the car stands still at the start                        | no                 |
-| `route_end`        | `customer` or `depot`: text shown when the route is completed    | `customer`         |
+| `route_end`        | `customer`: after the drop-off, drive on and pick up the next passenger; `depot`: stay parked | `customer`         |
 
 (*) The default scene keeps the loaded map, starts at spawn point 0 and drives
 400 m along the road.

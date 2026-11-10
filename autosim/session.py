@@ -13,7 +13,6 @@ simulation, runs the task logic, and logs every event.
          +------ draws state -----+    +---- hooks ---- tasks (TaskScript)
 """
 
-import math
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -24,7 +23,6 @@ from autosim.messages import resolve_message
 from autosim.datalog import DataLogger
 from autosim.link import CommandLink, VideoLink
 from autosim.scenario import Alert, Scenario, parse_alert
-from autosim.scene import Placement
 from autosim.simulation import DrivingMode, Simulation, VehicleState
 from autosim.tasks import TaskContext, TaskScript, build_tasks
 
@@ -105,8 +103,13 @@ class ScenarioSession:
 
         self.route_start_progress_m = 0.0
         self.route_total_m = 0.0
-        self.route_complete = False
-        self.route_complete_walker: Any = None
+        self.route_complete = False                        # the current trip's passenger was dropped off
+        self.route_completed_at: Optional[float] = None    # elapsed seconds, while waiting to drive on
+        self.trip_number = 1                               # 1 = the scenario's own route
+        self.trips_completed = 0
+        self.trip_start_m = 0.0                            # route_traveled_m where a later trip began
+        self.trip_length_m = 0.0                           # its length (0 for the first trip)
+        self._last_trip_leg = "destination"
 
         self.counts: Dict[str, int] = {}
         self.action_sequence: List[str] = []                # "action@seconds", in order
@@ -165,6 +168,7 @@ class ScenarioSession:
 
         self.vehicle_state = self.simulation.tick(dt)
         self._watch_vehicle()
+        self._maybe_start_next_trip()
         self._call_tasks("on_tick", dt)
         for camera, (capture_time, frame) in self.simulation.camera_frames().items():
             self.video_link.push(camera, capture_time, frame)
@@ -201,7 +205,9 @@ class ScenarioSession:
             "pull_overs": self.counts.get("pull_over", 0),
             "manual_control_s": round(self.manual_seconds, 1),
             "collisions": self.vehicle_state.collision_count,
-            "route_complete": self.route_complete,
+            "route_complete": self.trips_completed > 0,
+            "trips_completed": self.trips_completed,
+            "passengers_picked_up": self.trip_number - 1,
             "final_mode": self.vehicle_state.mode,
             "video_delay": self.video_link.delay.describe(),
             "input_delay": self.command_link.delay.describe(),
@@ -378,20 +384,29 @@ class ScenarioSession:
 
     def route_progress(self) -> Tuple[float, float]:
         """(miles travelled, total miles) for the Route panel."""
-        traveled = self.route_start_progress_m + self.vehicle_state.route_traveled_m
+        if self.trip_number > 1:   # later trips: their real length, from the pickup
+            traveled, total = self.vehicle_state.route_traveled_m - self.trip_start_m, self.trip_length_m
+        else:
+            traveled, total = self.route_start_progress_m + self.vehicle_state.route_traveled_m, self.route_total_m
         if self.route_complete:
-            traveled = self.route_total_m
-        traveled = min(traveled, self.route_total_m)
-        return traveled / METERS_PER_MILE, self.route_total_m / METERS_PER_MILE
+            traveled = total
+        traveled = max(0.0, min(traveled, total))
+        return traveled / METERS_PER_MILE, total / METERS_PER_MILE
 
     def route_minutes(self) -> Tuple[float, float]:
         """(minutes elapsed, total minutes) of the trip at a nominal trip speed."""
         traveled, total = self.route_progress()
         return traveled / ASSUMED_TRIP_SPEED_MPH * 60, total / ASSUMED_TRIP_SPEED_MPH * 60
 
-    def route_complete_text(self) -> str:
-        return (settings.ROUTE_COMPLETE_DEPOT_TEXT if self.return_to_depot
-                else settings.ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT)
+    def route_message(self) -> str:
+        """Text shown in the Route panel instead of the progress bar ("" = show progress)."""
+        if self.vehicle_state.trip_leg == "pickup":
+            return settings.ROUTE_TO_PICKUP_TEXT
+        if not self.route_complete:
+            return ""
+        if self.return_to_depot or not settings.PICK_UP_NEXT_PASSENGER:
+            return settings.ROUTE_COMPLETE_DEPOT_TEXT
+        return settings.ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT
 
     def unread_notifications(self) -> int:
         return sum(1 for n in self.notifications if not n.read)
@@ -424,16 +439,29 @@ class ScenarioSession:
                     and not state.stop_reason.startswith(TASK_STOP_PREFIX)):
                 self.add_alert(state.stop_reason, "warning")
             if state.mode == DrivingMode.DROPPING_OFF:
-                self.log("passenger_dropoff_started")
+                self.log("passenger_dropoff_started", trip=self.trip_number)
                 self.add_alert(settings.PASSENGER_DROPOFF_ALERT_TEXT, "info")
             elif old == DrivingMode.DROPPING_OFF:
                 self.remove_alert(settings.PASSENGER_DROPOFF_ALERT_TEXT)
                 if state.mode == DrivingMode.ROUTE_COMPLETE:
-                    self.log("passenger_dropoff_complete")
+                    self.log("passenger_dropoff_complete", trip=self.trip_number)
+            if state.mode == DrivingMode.PICKING_UP:
+                self.log("passenger_pickup_started", trip=self.trip_number + 1)
+                self.add_alert(settings.PASSENGER_PICKUP_ALERT_TEXT, "info")
+            elif old == DrivingMode.PICKING_UP:
+                self.remove_alert(settings.PASSENGER_PICKUP_ALERT_TEXT)
             if state.mode == DrivingMode.ROUTE_COMPLETE:
                 self._on_route_complete()
             if old:
                 self._call_tasks("on_mode_change", old, state.mode)
+        if state.trip_leg != self._last_trip_leg:
+            self._last_trip_leg = state.trip_leg
+            if state.trip_leg == "destination":     # the next passenger is on board
+                self.trip_number += 1
+                self.route_complete = False
+                self.trip_start_m = state.route_traveled_m
+                self.trip_length_m = max(1.0, state.route_length_m - state.route_traveled_m)
+                self.log("passenger_picked_up", trip=self.trip_number, trip_length_m=round(self.trip_length_m))
         if state.collision_count > self._last_collisions:
             self._last_collisions = state.collision_count
             self.log("collision", other=state.last_collision_with, total=state.collision_count)
@@ -442,28 +470,22 @@ class ScenarioSession:
             self.hazard_lights_on = state.hazard_lights_on
 
     def _on_route_complete(self) -> None:
+        if not self.route_complete:
+            self.trips_completed += 1
         self.route_complete = True
-        self.log("route_complete", return_to_depot=self.return_to_depot)
-        if settings.SPAWN_PEDESTRIAN_AT_ROUTE_END and not self.return_to_depot:
-            state = self.vehicle_state
-            # Relative to where the car actually stopped (at the curb, possibly
-            # lanes to the right of the route), not to the route's own lane.
-            yaw = math.radians(state.yaw_degrees)
-            forward, right = (math.cos(yaw), math.sin(yaw)), (-math.sin(yaw), math.cos(yaw))
+        self.route_completed_at = self.elapsed
+        self.log("route_complete", trip=self.trip_number, return_to_depot=self.return_to_depot)
 
-            def beside_car(ahead_m: float, right_m: float) -> Placement:
-                return Placement({"x": state.x + forward[0] * ahead_m + right[0] * right_m,
-                                  "y": state.y + forward[1] * ahead_m + right[1] * right_m,
-                                  "z": state.z, "yaw": state.yaw_degrees + 180.0})
-            try:
-                # A customer walks up along the sidewalk on the right.
-                self.route_complete_walker = self.simulation.spawn_walker(
-                    beside_car(8.0, settings.ROUTE_END_CUSTOMER_RIGHT_OF_CAR_METERS),
-                    beside_car(1.5, settings.ROUTE_END_CUSTOMER_RIGHT_OF_CAR_METERS),
-                    speed_mps=1.0,
-                )
-            except Exception as error:   # optional nicety; never fatal
-                print("[session] Could not spawn pedestrian: {}".format(error))
+    def _maybe_start_next_trip(self) -> None:
+        """A while after a drop-off, drive on to pick up the next passenger (unless returning to depot)."""
+        if (not settings.PICK_UP_NEXT_PASSENGER or self.return_to_depot or self.route_completed_at is None
+                or self.vehicle_state.mode != DrivingMode.ROUTE_COMPLETE
+                or self.elapsed - self.route_completed_at < settings.NEXT_PICKUP_DELAY_SECONDS):
+            return
+        pickup_after_m = self.rng.uniform(settings.NEXT_PICKUP_MIN_METERS, settings.NEXT_PICKUP_MAX_METERS)
+        self.route_completed_at = None
+        if self.simulation.start_next_trip(pickup_after_m, settings.NEXT_TRIP_LENGTH_METERS):
+            self.log("driving_to_pickup", trip=self.trip_number + 1, distance_m=round(pickup_after_m))
 
     def _accept_passenger_call(self) -> None:
         self.record_action("accept_passenger_call")
