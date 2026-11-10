@@ -49,3 +49,13 @@ def test_continuous_input_is_delayed():
     assert link.continuous_value("manual", 0.1) is None
     assert link.continuous_value("manual", 0.25) == (1, 0)
     assert link.continuous_value("manual", 0.3) == (1, 0)   # held until a newer value is due
+
+
+def test_frame_rate_that_does_not_divide_the_camera_rate():
+    # CARLA's cameras deliver 30 fps; 20 fps must keep 2 of every 3 frames, not 1 of 2 (= 15 fps).
+    for fps, expected in ((20, 40), (25, 50), (10, 20), (7, 14)):
+        link = VideoLink(fps=fps)
+        for index in range(60):           # two seconds of a 30 fps camera
+            link.push("front", index / 30.0, index)
+        kept = len(link._channels["front"].pending)
+        assert abs(kept - expected) <= 1, (fps, kept)
