@@ -287,6 +287,10 @@ YIELD_GAP_SECONDS: float = 4.0             # cross traffic arriving sooner than 
 YIELD_WATCH_METERS: float = 35.0           # look this far up the other roads for cross traffic
 YIELD_MAX_WAIT_SECONDS: float = 15.0       # then stop and ask the operator (Resume AV crosses)
 
+# Held in AV mode by a stopped vehicle or a pedestrian ahead for this long: the
+# AV stops and asks the operator for help.  (Red lights are simply waited out.)
+AV_BLOCKED_ASK_SECONDS: float = 20.0
+
 # Controlled ("soft") stop used by task logic, and the emergency stop.
 SOFT_STOP_BRAKE: float = 0.5
 EMERGENCY_STOP_BRAKE: float = 1.0

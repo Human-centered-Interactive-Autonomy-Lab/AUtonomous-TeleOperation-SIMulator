@@ -67,7 +67,8 @@ class VehicleState:
         self.collision_count: int = 0
         self.last_collision_with: str = ""       # type of the actor hit last
         self.lane_id: int = 0
-        self.waiting_for: str = ""               # AV mode, held by a traffic rule: "stop sign", "cross traffic"
+        self.waiting_for: str = ""               # why the AV stands still in AV mode: "stop sign", "cross
+                                                 # traffic", "red light", "vehicle ahead", "pedestrian"
         self.stop_reason: str = ""               # why the AV stopped by itself, if it did
         self.trip_leg: str = "destination"       # "destination" (passenger on board) or "pickup"
 
