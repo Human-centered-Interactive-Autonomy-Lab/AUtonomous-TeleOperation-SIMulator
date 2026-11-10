@@ -401,28 +401,8 @@ PANEL_TITLES: Dict[str, str] = {
 }
 
 # --- Colors (R, G, B) -------------------------------------------------------
-COLORS: Dict[str, Tuple[int, int, int]] = {
-    # Surfaces (dark theme)
-    "background":        (14, 17, 23),
-    "panel":             (27, 32, 42),
-    "panel_border":      (45, 53, 68),
-    "panel_title":       (226, 232, 240),
-    "row_hover":         (38, 45, 58),
-    "dialog":            (32, 38, 50),
-    "overlay_shade":     (0, 0, 0),
-    "camera_placeholder": (22, 26, 34),
-    # Text
-    "text":              (226, 232, 240),
-    "text_dim":          (148, 160, 178),
-    "text_warning":      (250, 190, 70),
-    "text_critical":     (248, 113, 113),
-    "waiting_text":      (200, 210, 225),
-    # Buttons
-    "button":            (48, 57, 74),
-    "button_hover":      (62, 73, 94),
-    "button_border":     (70, 82, 104),
-    "button_text":       (241, 245, 249),
-    "button_disabled":   (40, 46, 58),
+_COMMON_COLORS: Dict[str, Tuple[int, int, int]] = {
+    "text_on_color":     (255, 255, 255),   # on badges, red/orange/green buttons and video
     "button_toggled":    (22, 150, 100),
     "button_danger":     (220, 38, 38),
     "button_danger_hover": (239, 68, 68),
@@ -431,32 +411,105 @@ COLORS: Dict[str, Tuple[int, int, int]] = {
     "button_yes":        (22, 163, 74),
     "button_no":         (220, 38, 38),
     "accent":            (59, 130, 246),
-    # On/off switches
     "switch_on":         (34, 197, 94),
-    "switch_off":        (71, 82, 102),
-    "switch_knob":       (248, 250, 252),
-    # Status badges (driving mode)
+    "switch_knob":       (255, 255, 255),
     "badge_normal":      (37, 99, 235),
     "badge_warning":     (217, 119, 6),
     "badge_critical":    (220, 38, 38),
-    "badge_neutral":     (71, 85, 105),
-    # Route progress
-    "progress_back":     (51, 60, 77),
+    "badge_neutral":     (100, 116, 139),
     "progress_fill":     (34, 197, 94),
-    # Alert severities
     "severity_info":     (96, 165, 250),
-    "severity_warning":  (250, 190, 70),
-    "severity_critical": (248, 113, 113),
-    # Map
-    "map_background":    (19, 24, 32),
-    "map_road":          (82, 94, 114),
+    "severity_warning":  (245, 170, 40),
+    "severity_critical": (239, 68, 68),
     "map_route":         (56, 189, 248),
     "map_ego":           (250, 204, 21),
     "map_hazard":        (248, 113, 113),
-    # Notification banner
     "banner":            (250, 204, 90),
     "banner_text":       (28, 25, 23),
+    "overlay_shade":     (0, 0, 0),
 }
+
+# Three color themes; pick one with THEME.  "blue" follows the lab's mockup.
+THEME: str = "blue"           # "blue", "light" or "dark"
+
+_THEMES: Dict[str, Dict[str, Tuple[int, int, int]]] = {
+    "blue": {
+        "background":        (22, 40, 66),
+        "panel":             (40, 74, 122),
+        "panel_border":      (62, 100, 152),
+        "panel_title":       (240, 245, 252),
+        "row_hover":         (50, 88, 140),
+        "dialog":            (36, 66, 110),
+        "camera_placeholder": (28, 48, 78),
+        "text":              (240, 245, 252),
+        "text_dim":          (180, 198, 222),
+        "text_warning":      (255, 205, 80),
+        "text_critical":     (255, 120, 110),
+        "waiting_text":      (210, 222, 238),
+        "button":            (60, 102, 158),
+        "button_hover":      (78, 124, 186),
+        "button_border":     (92, 136, 196),
+        "button_text":       (245, 248, 252),
+        "button_disabled":   (52, 78, 112),
+        "switch_off":        (30, 54, 88),
+        "progress_back":     (26, 48, 80),
+        "map_background":    (28, 48, 78),
+        "map_road":          (110, 136, 170),
+        "toast":             (24, 44, 74),
+        "toast_text":        (255, 210, 100),
+    },
+    "light": {
+        "background":        (226, 232, 240),
+        "panel":             (255, 255, 255),
+        "panel_border":      (203, 213, 225),
+        "panel_title":       (15, 23, 42),
+        "row_hover":         (241, 245, 249),
+        "dialog":            (255, 255, 255),
+        "camera_placeholder": (203, 213, 225),
+        "text":              (15, 23, 42),
+        "text_dim":          (100, 116, 139),
+        "text_warning":      (180, 83, 9),
+        "text_critical":     (185, 28, 28),
+        "waiting_text":      (51, 65, 85),
+        "button":            (241, 245, 249),
+        "button_hover":      (226, 232, 240),
+        "button_border":     (203, 213, 225),
+        "button_text":       (15, 23, 42),
+        "button_disabled":   (226, 232, 240),
+        "switch_off":        (203, 213, 225),
+        "progress_back":     (226, 232, 240),
+        "map_background":    (241, 245, 249),
+        "map_road":          (148, 163, 184),
+        "toast":             (15, 23, 42),
+        "toast_text":        (255, 255, 255),
+    },
+    "dark": {
+        "background":        (14, 17, 23),
+        "panel":             (27, 32, 42),
+        "panel_border":      (45, 53, 68),
+        "panel_title":       (226, 232, 240),
+        "row_hover":         (38, 45, 58),
+        "dialog":            (32, 38, 50),
+        "camera_placeholder": (22, 26, 34),
+        "text":              (226, 232, 240),
+        "text_dim":          (148, 160, 178),
+        "text_warning":      (250, 190, 70),
+        "text_critical":     (248, 113, 113),
+        "waiting_text":      (200, 210, 225),
+        "button":            (48, 57, 74),
+        "button_hover":      (62, 73, 94),
+        "button_border":     (70, 82, 104),
+        "button_text":       (241, 245, 249),
+        "button_disabled":   (40, 46, 58),
+        "switch_off":        (71, 82, 102),
+        "progress_back":     (51, 60, 77),
+        "map_background":    (19, 24, 32),
+        "map_road":          (82, 94, 114),
+        "toast":             (32, 38, 50),
+        "toast_text":        (250, 190, 70),
+    },
+}
+COLORS: Dict[str, Tuple[int, int, int]] = dict(_COMMON_COLORS, **_THEMES[THEME])
 
 # --- Fonts (as a fraction of window height, so text scales) -----------------
 # The first installed family is used (Segoe UI on Windows); pygame's built-in
@@ -473,7 +526,7 @@ FONT_SCALE: Dict[str, float] = {
 
 # --- Timing -----------------------------------------------------------------
 NOTIFICATION_BANNER_SECONDS: float = 4.0     # 3-5 s per requirements
-ACTION_FEEDBACK_SECONDS: float = 3.0         # fading text in the Actions panel
+ACTION_FEEDBACK_SECONDS: float = 3.0         # fading message (top-right of the Actions panel)
 MAP_DEFAULT_METERS_ACROSS: float = 300.0     # initial map zoom
 MAP_ZOOM_STEP: float = 1.5                   # factor per zoom click
 MAP_MIN_METERS_ACROSS: float = 40.0

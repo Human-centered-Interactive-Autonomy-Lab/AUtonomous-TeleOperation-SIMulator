@@ -206,7 +206,7 @@ class OperatorInterface:
                 self._draw_camera(name, rect, video_link.frame(CAMERA_PANELS[name], now), session)
             elif name in draw_functions:
                 draw_functions[name](rect, session)
-        self._draw_banner(session)
+        self._draw_messages(session)
         if self.show_notification_list:
             self._draw_notification_list(session)
         if self.open_notification is not None:
@@ -272,7 +272,7 @@ class OperatorInterface:
 
     def _badge(self, text: str, color: Color, position: Tuple[int, int], anchor: str = "midright") -> Rect:
         """A rounded status label, e.g. the driving mode."""
-        surface = self._text(text, "small", C["button_text"])
+        surface = self._text(text, "small", C["text_on_color"])
         badge = Rect(0, 0, surface.get_width() + 18, surface.get_height() + 6)
         setattr(badge, anchor, position)
         pygame.draw.rect(self.screen, color, badge, border_radius=badge.height // 2)
@@ -317,7 +317,7 @@ class OperatorInterface:
         if unread:
             badge_center = (bell.right - 2, bell.y + 4)
             pygame.draw.circle(self.screen, C["button_danger"], badge_center, max(7, size // 3))
-            self._blit_text(str(unread), "small", C["text"], badge_center, anchor="center")
+            self._blit_text(str(unread), "small", C["text_on_color"], badge_center, anchor="center")
 
         def toggle_list() -> None:
             self.show_notification_list = not self.show_notification_list
@@ -396,7 +396,7 @@ class OperatorInterface:
         camera = CAMERA_PANELS[panel_name]
         if self.offline:
             pygame.draw.rect(self.screen, (0, 0, 0), area)
-            self._blit_text("No connection to CARLA", "normal", C["text_dim"], area.center, anchor="center")
+            self._blit_text("No connection to CARLA", "normal", C["text_on_color"], area.center, anchor="center")
         elif frame is None:
             pygame.draw.rect(self.screen, C["camera_placeholder"], area)
             self._blit_text("No video", "normal", C["text_dim"], area.center, anchor="center")
@@ -408,7 +408,7 @@ class OperatorInterface:
                 self._camera_cache[camera] = (id(frame), surface)
             self.screen.blit(self._camera_cache[camera][1], area.topleft)
         label = settings.PANEL_TITLES.get(panel_name, camera)
-        label_surface = self._text(label, "small", C["text"])
+        label_surface = self._text(label, "small", C["text_on_color"])     # on a dark pill over the video
         background = Rect(area.x + 6, area.y + 6, label_surface.get_width() + 16, label_surface.get_height() + 6)
         shade = pygame.Surface(background.size, pygame.SRCALPHA)
         pygame.draw.rect(shade, (0, 0, 0, 150), shade.get_rect(), border_radius=background.height // 2)
@@ -534,20 +534,6 @@ class OperatorInterface:
             self._action_button(Rect(content.right - width, content.bottom - end_height, width, end_height),
                                 action, session)
 
-        # Fading feedback messages (bottom left) -- instead of a popup for every click.
-        bottom = content.bottom
-        for text, opacity in reversed(session.active_feedback()):
-            wrapped = self._wrap(text, "small", left.width - 16)
-            box = Rect(content.x, 0, left.width, len(wrapped) * self.fonts["small"].get_height() + 10)
-            box.bottom = bottom
-            toast = pygame.Surface(box.size, pygame.SRCALPHA)
-            pygame.draw.rect(toast, C["dialog"] + (int(235 * opacity),), toast.get_rect(), border_radius=6)
-            for index, part in enumerate(wrapped):
-                surface = self._text(part, "small", C["text_warning"]).copy()
-                surface.set_alpha(int(255 * opacity))
-                toast.blit(surface, (8, 5 + index * self.fonts["small"].get_height()))
-            self.screen.blit(toast, box.topleft)
-            bottom = box.y - 4
 
     def _command_lines(self, action: actions.Action, width: int) -> List[str]:
         """A command's label wrapped to the row (at most three lines)."""
@@ -603,26 +589,50 @@ class OperatorInterface:
     # Overlays
     # =====================================================================
 
-    def _draw_banner(self, session: ScenarioSession) -> None:
-        """Newest notification as a banner for a few seconds."""
-        if not session.notifications:
+    def _draw_messages(self, session: ScenarioSession) -> None:
+        """Pop-up messages in the top-right corner of the Actions panel, beside its title:
+        the newest of the notification banner (click to open it) and the feedback to
+        the operator's last action (fades out)."""
+        panel = self.panels.get("actions", self.screen.get_rect())
+        title_width = self.fonts["title"].size(settings.PANEL_TITLES.get("actions", ""))[0]
+        slot = Rect(panel.x + 12 + title_width + 16, panel.y + 6, 0, self.fonts["title"].get_height() + 4)
+        slot.width = panel.right - 10 - slot.x
+        if slot.width < 60:
             return
-        newest = session.notifications[0]
-        if session.elapsed - newest.created_at > settings.NOTIFICATION_BANNER_SECONDS or newest.handled:
-            return
-        width = self.screen.get_width()
-        text = newest.title + ("  -  " + newest.body if newest.body else "")
-        surface = self._text(self._fit_text(text, "normal", int(width * 0.45)), "normal", C["banner_text"])
-        banner = Rect(0, 0, surface.get_width() + 30, surface.get_height() + 14)
-        # Below the speed read-out, so the speed is never hidden.
-        anchor = self.panels.get("camera_top_down", self.screen.get_rect())
-        banner.midtop = (anchor.centerx, anchor.y + 4)
-        pygame.draw.rect(self.screen, C["banner"], banner, border_radius=8)
-        self.screen.blit(surface, (banner.x + 15, banner.y + 7))
+        now = time.monotonic()
+        banner, banner_time = None, None
+        if session.notifications:
+            newest = session.notifications[0]
+            age = session.elapsed - newest.created_at
+            if age <= settings.NOTIFICATION_BANNER_SECONDS and not newest.handled:
+                banner, banner_time = newest, now - age
+        feedback = [m for m in session.feedback_messages if now - m.created < m.duration]
+        latest = feedback[-1] if feedback else None
+        if banner is not None and (latest is None or banner_time >= latest.created):
+            text = banner.title + ("  -  " + banner.body if banner.body else "")
+            if self.fonts["small"].size(text)[0] > slot.width - 20:
+                text = banner.title            # the full text is one click away
+            surface = self._text(self._fit_text(text, "small", slot.width - 20), "small", C["banner_text"])
+            box = Rect(0, 0, surface.get_width() + 20, slot.height)
+            box.topright = slot.topright
+            pygame.draw.rect(self.screen, C["banner"], box, border_radius=box.height // 2)
+            self.screen.blit(surface, surface.get_rect(center=box.center))
 
-        def open_it() -> None:
-            self._open_notification(newest, session)
-        self._hotspots.append(Hotspot(banner, open_it, layer=3))
+            def open_it() -> None:
+                self._open_notification(banner, session)
+            self._hotspots.append(Hotspot(box, open_it, layer=3))
+        elif latest is not None:
+            age = now - latest.created
+            fade_start = latest.duration * 0.6
+            opacity = 1.0 if age < fade_start else max(0.0, 1.0 - (age - fade_start) / (latest.duration - fade_start))
+            surface = self._text(self._fit_text(latest.text, "small", slot.width - 20), "small", C["toast_text"]).copy()
+            box = Rect(0, 0, surface.get_width() + 20, slot.height)
+            box.topright = slot.topright
+            toast = pygame.Surface(box.size, pygame.SRCALPHA)
+            pygame.draw.rect(toast, C["toast"] + (int(240 * opacity),), toast.get_rect(), border_radius=box.height // 2)
+            surface.set_alpha(int(255 * opacity))
+            toast.blit(surface, surface.get_rect(center=toast.get_rect().center))
+            self.screen.blit(toast, box.topleft)
 
     def _overlay_box(self, width_fraction: float, height_lines: int, anchor_panel: str = "status") -> Rect:
         """Rectangle for a dialog, placed over the given panel column (not the front camera)."""
@@ -793,7 +803,9 @@ class OperatorInterface:
             pygame.draw.rect(self.screen, C["button_border"], rect, 1, border_radius=radius)
         if style in ("estop", "toggled") and enabled:     # emergency stop / switched on: white ring
             pygame.draw.rect(self.screen, (255, 255, 255), rect.inflate(-6, -6), 2, border_radius=radius - 2)
-        text_color = C["text_warning"] if highlighted else (C["button_text"] if enabled else C["text_dim"])
+        on_color = style not in ("normal", "link")          # red / orange / green buttons
+        text_color = (C["text_warning"] if highlighted else C["text_on_color"] if on_color and enabled
+                      else C["button_text"] if enabled else C["text_dim"])
         text = self._fit_text(label, font, rect.width - 16)
         if align == "left":
             self._blit_text(text, font, text_color, (rect.x + 10, rect.centery), anchor="midleft")
