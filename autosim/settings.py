@@ -261,6 +261,8 @@ SOFT_STOP_BRAKE: float = 0.5
 EMERGENCY_STOP_BRAKE: float = 1.0
 
 # Pull over: drive slowly this far ahead while shifting to the road edge.
+# Never inside an intersection: with one in that stretch, the AV crosses it
+# first (normal rules) and stops this far past it.
 PULL_OVER_SPEED_MPH: float = 6.0
 PULL_OVER_DISTANCE_METERS: float = 18.0
 PULL_OVER_EDGE_MARGIN_METERS: float = 0.4    # gap kept to the lane edge
@@ -298,8 +300,9 @@ STOPPED_SPEED_MPH: float = 0.5
 # After a drop-off the AV picks up the next passenger: it waits a moment,
 # drives on for a random distance, pulls over where a pedestrian is waiting
 # beside the road, the passenger gets in, and it drives them to their
-# destination, where they are dropped off and the cycle repeats.  This does
-# not happen when "Return to depot after this job" is on.
+# destination, where they are dropped off and the cycle repeats.  With "Pull
+# over and wait for fleet assistance after this job" on, the AV instead stays
+# pulled over (hazard lights on) after the drop-off.
 PICK_UP_NEXT_PASSENGER: bool = True
 NEXT_PICKUP_DELAY_SECONDS: float = 5.0          # parked after the drop-off before driving on
 NEXT_PICKUP_MIN_METERS: float = 150.0           # drive this far (random between min and max)
@@ -307,14 +310,16 @@ NEXT_PICKUP_MAX_METERS: float = 300.0           #   before reaching the waiting 
 NEXT_TRIP_LENGTH_METERS: float = 400.0          # pickup to drop-off
 PASSENGER_BOARDING_TIMEOUT_SECONDS: float = 15.0   # passenger is in the car after this at the latest
 
-# Alerts shown while a passenger gets out / in.
+# Alerts shown while a passenger gets out / in, and while waiting for the fleet.
 PASSENGER_DROPOFF_ALERT_TEXT: str = "Passenger is getting out"
 PASSENGER_PICKUP_ALERT_TEXT: str = "Passenger is getting in"
+FLEET_ASSISTANCE_ALERT_TEXT: str = "Pulled over, waiting for fleet assistance"
 
 # Text shown in the Route panel after the route is completed, and on the way
 # to the next pickup.
 ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT: str = "Route complete. Picking up next passenger."
-ROUTE_COMPLETE_DEPOT_TEXT: str = "Route complete. Returning to depot."
+ROUTE_COMPLETE_FLEET_TEXT: str = "Route complete. Waiting for fleet assistance."
+ROUTE_COMPLETE_TEXT: str = "Route complete."     # PICK_UP_NEXT_PASSENGER off
 ROUTE_TO_PICKUP_TEXT: str = "Driving to pick up the next passenger."
 
 
@@ -397,44 +402,68 @@ PANEL_TITLES: Dict[str, str] = {
 
 # --- Colors (R, G, B) -------------------------------------------------------
 COLORS: Dict[str, Tuple[int, int, int]] = {
-    "background":        (18, 24, 33),
-    "panel":             (40, 74, 122),
-    "panel_border":      (22, 40, 66),
-    "panel_title":       (235, 241, 250),
-    "text":              (235, 241, 250),
-    "text_dim":          (170, 186, 208),
-    "text_warning":      (255, 205, 80),
-    "text_critical":     (255, 110, 100),
-    "camera_placeholder": (28, 36, 48),
-    "button":            (62, 102, 156),
-    "button_hover":      (82, 126, 186),
-    "button_text":       (245, 248, 252),
-    "button_disabled":   (60, 70, 84),
-    "button_toggled":    (40, 150, 110),
-    "button_danger":     (210, 35, 35),
-    "button_danger_hover": (240, 60, 60),
-    "button_primary":    (235, 125, 30),
-    "button_primary_hover": (250, 150, 60),
-    "button_yes":        (30, 160, 70),
-    "button_no":         (205, 40, 40),
-    "progress_back":     (190, 196, 204),
-    "progress_fill":     (110, 200, 80),
-    "severity_info":     (150, 200, 255),
-    "severity_warning":  (255, 205, 80),
-    "severity_critical": (255, 110, 100),
-    "map_background":    (30, 44, 62),
-    "map_road":          (120, 134, 152),
-    "map_route":         (80, 200, 255),
-    "map_ego":           (255, 200, 40),
-    "map_hazard":        (255, 90, 80),
-    "banner":            (250, 220, 120),
-    "banner_text":       (30, 30, 30),
+    # Surfaces (dark theme)
+    "background":        (14, 17, 23),
+    "panel":             (27, 32, 42),
+    "panel_border":      (45, 53, 68),
+    "panel_title":       (226, 232, 240),
+    "row_hover":         (38, 45, 58),
+    "dialog":            (32, 38, 50),
     "overlay_shade":     (0, 0, 0),
-    "dialog":            (32, 58, 98),
+    "camera_placeholder": (22, 26, 34),
+    # Text
+    "text":              (226, 232, 240),
+    "text_dim":          (148, 160, 178),
+    "text_warning":      (250, 190, 70),
+    "text_critical":     (248, 113, 113),
     "waiting_text":      (200, 210, 225),
+    # Buttons
+    "button":            (48, 57, 74),
+    "button_hover":      (62, 73, 94),
+    "button_border":     (70, 82, 104),
+    "button_text":       (241, 245, 249),
+    "button_disabled":   (40, 46, 58),
+    "button_toggled":    (22, 150, 100),
+    "button_danger":     (220, 38, 38),
+    "button_danger_hover": (239, 68, 68),
+    "button_primary":    (234, 120, 30),
+    "button_primary_hover": (249, 145, 60),
+    "button_yes":        (22, 163, 74),
+    "button_no":         (220, 38, 38),
+    "accent":            (59, 130, 246),
+    # On/off switches
+    "switch_on":         (34, 197, 94),
+    "switch_off":        (71, 82, 102),
+    "switch_knob":       (248, 250, 252),
+    # Status badges (driving mode)
+    "badge_normal":      (37, 99, 235),
+    "badge_warning":     (217, 119, 6),
+    "badge_critical":    (220, 38, 38),
+    "badge_neutral":     (71, 85, 105),
+    # Route progress
+    "progress_back":     (51, 60, 77),
+    "progress_fill":     (34, 197, 94),
+    # Alert severities
+    "severity_info":     (96, 165, 250),
+    "severity_warning":  (250, 190, 70),
+    "severity_critical": (248, 113, 113),
+    # Map
+    "map_background":    (19, 24, 32),
+    "map_road":          (82, 94, 114),
+    "map_route":         (56, 189, 248),
+    "map_ego":           (250, 204, 21),
+    "map_hazard":        (248, 113, 113),
+    # Notification banner
+    "banner":            (250, 204, 90),
+    "banner_text":       (28, 25, 23),
 }
 
 # --- Fonts (as a fraction of window height, so text scales) -----------------
+# The first installed family is used (Segoe UI on Windows); pygame's built-in
+# font if none is installed.
+FONT_FAMILIES: str = "segoeui,inter,helveticaneue,helvetica,arial,dejavusans"
+FONT_BOLD: Tuple[str, ...] = ("title", "big")
+CORNER_RADIUS: int = 8          # panels and buttons
 FONT_SCALE: Dict[str, float] = {
     "small":  0.017,
     "normal": 0.021,

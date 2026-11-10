@@ -94,10 +94,10 @@ class ScenarioSession:
 
         self.manual_control_active = False
         self.hazard_lights_on = False
-        self.return_to_depot = scenario.route_end == "depot"
+        self.wait_for_fleet = scenario.route_end == "fleet"   # stay pulled over after this job
         self.call_partner = ""                             # "" = no active call
         self.call_muted = False
-        self.talking_to = ""                               # push-to-talk target
+        self.talking_to = ""                               # who the operator is talking to
         self.end_requested = False
 
         self.route_complete = False                        # the current trip's passenger was dropped off
@@ -408,8 +408,10 @@ class ScenarioSession:
             return settings.ROUTE_TO_PICKUP_TEXT
         if not self.route_complete:
             return ""
-        if self.return_to_depot or not settings.PICK_UP_NEXT_PASSENGER:
-            return settings.ROUTE_COMPLETE_DEPOT_TEXT
+        if self.wait_for_fleet:
+            return settings.ROUTE_COMPLETE_FLEET_TEXT
+        if not settings.PICK_UP_NEXT_PASSENGER:
+            return settings.ROUTE_COMPLETE_TEXT
         return settings.ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT
 
     def unread_notifications(self) -> int:
@@ -485,11 +487,14 @@ class ScenarioSession:
             self.trips_completed += 1
         self.route_complete = True
         self.route_completed_at = self.elapsed
-        self.log("route_complete", trip=self.trip_number, return_to_depot=self.return_to_depot)
+        self.log("route_complete", trip=self.trip_number, wait_for_fleet=self.wait_for_fleet)
+        if self.wait_for_fleet:    # already pulled over at the curb with hazard lights on
+            self.log("waiting_for_fleet_assistance", trip=self.trip_number)
+            self.add_alert(settings.FLEET_ASSISTANCE_ALERT_TEXT, "info")
 
     def _maybe_start_next_trip(self) -> None:
-        """A while after a drop-off, drive on to pick up the next passenger (unless returning to depot)."""
-        if (not settings.PICK_UP_NEXT_PASSENGER or self.return_to_depot or self.route_completed_at is None
+        """A while after a drop-off, drive on to pick up the next passenger (unless waiting for the fleet)."""
+        if (not settings.PICK_UP_NEXT_PASSENGER or self.wait_for_fleet or self.route_completed_at is None
                 or self.vehicle_state.mode != DrivingMode.ROUTE_COMPLETE
                 or self.elapsed - self.route_completed_at < settings.NEXT_PICKUP_DELAY_SECONDS):
             return

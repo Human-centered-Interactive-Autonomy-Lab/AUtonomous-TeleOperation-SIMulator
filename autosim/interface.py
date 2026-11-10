@@ -106,10 +106,15 @@ class OperatorInterface:
             name: Rect(int(x * width), int(y * height), int(w * width), int(h * height))
             for name, (x, y, w, h) in settings.PANEL_LAYOUT.items()
         }
-        self.fonts = {
-            name: pygame.font.Font(None, max(10, int(scale * height * 1.35)))
-            for name, scale in settings.FONT_SCALE.items()
-        }
+        # A modern system font when one is installed, else pygame's built-in one.
+        installed = pygame.font.match_font(settings.FONT_FAMILIES) is not None
+        self.fonts = {}
+        for name, scale in settings.FONT_SCALE.items():
+            bold = name in settings.FONT_BOLD
+            if installed:
+                self.fonts[name] = pygame.font.SysFont(settings.FONT_FAMILIES, max(10, int(scale * height)), bold=bold)
+            else:
+                self.fonts[name] = pygame.font.Font(None, max(10, int(scale * height * 1.35)))   # already bold-ish
         self._text_cache.clear()
         self._camera_cache.clear()
 
@@ -227,48 +232,72 @@ class OperatorInterface:
     # =====================================================================
 
     def _panel(self, rect: Rect, title: Optional[str] = None) -> Rect:
-        """Draw a panel background and title; returns the content area."""
-        pygame.draw.rect(self.screen, C["panel"], rect, border_radius=6)
-        pygame.draw.rect(self.screen, C["panel_border"], rect, 2, border_radius=6)
+        """Draw a panel (card) and its title; returns the content area."""
+        radius = settings.CORNER_RADIUS
+        pygame.draw.rect(self.screen, C["panel"], rect, border_radius=radius)
+        pygame.draw.rect(self.screen, C["panel_border"], rect, 1, border_radius=radius)
         if not title:
-            return rect.inflate(-12, -12)
-        title_height = self.fonts["title"].get_height() + 6
-        self._blit_text(title, "title", C["panel_title"], (rect.centerx, rect.y + 4), anchor="midtop")
-        return Rect(rect.x + 8, rect.y + title_height + 2, rect.width - 16, rect.height - title_height - 8)
+            return rect.inflate(-16, -16)
+        title_height = self.fonts["title"].get_height()
+        self._blit_text(title, "title", C["panel_title"], (rect.x + 12, rect.y + 8))
+        top = rect.y + 8 + title_height + 6
+        return Rect(rect.x + 12, top, rect.width - 24, rect.bottom - top - 10)
 
     def _draw_speed(self, rect: Rect, session: ScenarioSession) -> None:
-        self._panel(rect)
+        content = self._panel(rect)
         state = session.vehicle_state
-        self._blit_text("{:.0f} MPH".format(state.speed_mph), "big", C["text"],
-                        (rect.centerx - rect.width // 8, rect.centery), anchor="center")
-        mode_color = C["text_critical"] if state.mode == DrivingMode.EMERGENCY_STOP else (
-            C["text_warning"] if state.mode in (DrivingMode.HOLDING, DrivingMode.STOPPING, DrivingMode.MANUAL)
-            else C["text_dim"])
+        speed = self._text("{:.0f}".format(state.speed_mph), "big", C["text"])
+        speed_rect = speed.get_rect(midleft=(content.x + 8, rect.centery))
+        self.screen.blit(speed, speed_rect)
+        self._blit_text("mph", "normal", C["text_dim"], (speed_rect.right + 6, speed_rect.bottom - 8), anchor="bottomleft")
+        # Driving mode (and hazard lights) as status badges on the right.
+        if state.mode == DrivingMode.EMERGENCY_STOP:
+            badge = "badge_critical"
+        elif state.mode in (DrivingMode.HOLDING, DrivingMode.STOPPING, DrivingMode.MANUAL) or state.waiting_for:
+            badge = "badge_warning"
+        elif state.mode == DrivingMode.AUTONOMOUS:
+            badge = "badge_normal"
+        else:
+            badge = "badge_neutral"
         label = DrivingMode.LABELS.get(state.mode, state.mode)
         if state.waiting_for:            # e.g. "AV mode - stop sign"
             label = "{} - {}".format(label, state.waiting_for)
-        self._blit_text(label, "small", mode_color, (rect.right - 10, rect.centery - 8), anchor="midright")
-        if session.hazard_lights_on and int(time.monotonic() * 2) % 2 == 0:
-            self._blit_text("HAZARDS", "small", C["text_warning"], (rect.right - 10, rect.centery + 10),
-                            anchor="midright")
+        lines = 2 if session.hazard_lights_on else 1
+        gap = self.fonts["small"].get_height() + 12
+        top = rect.centery - (lines - 1) * gap // 2
+        self._badge(label, C[badge], (content.right, top))
+        if session.hazard_lights_on:
+            blink_on = int(time.monotonic() * 2) % 2 == 0
+            self._badge("Hazard lights", C["badge_warning"] if blink_on else C["badge_neutral"], (content.right, top + gap))
+
+    def _badge(self, text: str, color: Color, position: Tuple[int, int], anchor: str = "midright") -> Rect:
+        """A rounded status label, e.g. the driving mode."""
+        surface = self._text(text, "small", C["button_text"])
+        badge = Rect(0, 0, surface.get_width() + 18, surface.get_height() + 6)
+        setattr(badge, anchor, position)
+        pygame.draw.rect(self.screen, color, badge, border_radius=badge.height // 2)
+        self.screen.blit(surface, surface.get_rect(center=badge.center))
+        return badge
 
     def _draw_alerts(self, rect: Rect, session: ScenarioSession) -> None:
         content = self._panel(rect, settings.PANEL_TITLES.get("alerts"))
         self._draw_bell(rect, session)
-        line_height = self.fonts["normal"].get_height() + 4
+        line_height = self.fonts["normal"].get_height() + 10
         visible_lines = max(1, content.height // line_height)
         alerts = session.alerts
         self.alert_scroll = min(self.alert_scroll, max(0, len(alerts) - visible_lines))
         if not alerts:
             self._blit_text("No active alerts", "normal", C["text_dim"], content.topleft)
+        scroll_space = 12 if len(alerts) > visible_lines else 0
         for row, alert in enumerate(alerts[self.alert_scroll:self.alert_scroll + visible_lines]):
-            y = content.y + row * line_height
-            color = C["severity_" + alert.severity]
-            pygame.draw.circle(self.screen, color, (content.x + 6, y + line_height // 2 - 1), 5)
-            text = self._fit_text(alert.text, "normal", content.width - 34)
-            self._blit_text(text, "normal", C["text"], (content.x + 18, y))
+            item = Rect(content.x, content.y + row * line_height, content.width - scroll_space, line_height - 4)
+            pygame.draw.rect(self.screen, C["row_hover"], item, border_radius=6)
+            pygame.draw.rect(self.screen, C["severity_" + alert.severity], (item.x, item.y, 4, item.height),
+                             border_top_left_radius=6, border_bottom_left_radius=6)
+            text = self._fit_text(alert.text, "normal", item.width - 22)
+            self._blit_text(text, "normal", C["text"], (item.x + 14, item.centery), anchor="midleft")
         if len(alerts) > visible_lines:   # scroll bar
-            bar = Rect(content.right - 8, content.y, 6, content.height)
+            bar = Rect(content.right - 6, content.y, 6, content.height)
             pygame.draw.rect(self.screen, C["panel_border"], bar, border_radius=3)
             knob_height = max(12, bar.height * visible_lines // len(alerts))
             knob_y = bar.y + (bar.height - knob_height) * self.alert_scroll // max(1, len(alerts) - visible_lines)
@@ -343,7 +372,7 @@ class OperatorInterface:
             self._status_line(content.x, y, label, value, key, unit)
             y += line
         # Tire pressures in a 2 x 2 grid: front-left/right, rear-left/right.
-        self._blit_text("Tire pressure", "normal", C["text"], (content.x, y))
+        self._blit_text("Tire pressure", "normal", C["text_dim"], (content.x, y))
         grid_x = content.x + self.fonts["normal"].size("Tire pressure  ")[0]
         for index, key in enumerate(("tire_fl_psi", "tire_fr_psi", "tire_rl_psi", "tire_rr_psi")):
             column, row_index = index % 2, index // 2
@@ -357,7 +386,7 @@ class OperatorInterface:
             self._action_button(button, action, session)
 
     def _status_line(self, x: int, y: int, label: str, value: Any, key: str, unit: str) -> None:
-        self._blit_text("{}:".format(label), "normal", C["text"], (x, y))
+        self._blit_text(label, "normal", C["text_dim"], (x, y))
         offset = self.fonts["normal"].size("Battery temp:  ")[0]
         self._blit_text(self._format(value) + unit, "normal", self._value_color(key, value), (x + offset, y))
 
@@ -380,17 +409,17 @@ class OperatorInterface:
             self.screen.blit(self._camera_cache[camera][1], area.topleft)
         label = settings.PANEL_TITLES.get(panel_name, camera)
         label_surface = self._text(label, "small", C["text"])
-        background = Rect(area.x + 4, area.y + 4, label_surface.get_width() + 10, label_surface.get_height() + 4)
+        background = Rect(area.x + 6, area.y + 6, label_surface.get_width() + 16, label_surface.get_height() + 6)
         shade = pygame.Surface(background.size, pygame.SRCALPHA)
-        shade.fill((0, 0, 0, 140))
+        pygame.draw.rect(shade, (0, 0, 0, 150), shade.get_rect(), border_radius=background.height // 2)
         self.screen.blit(shade, background.topleft)
-        self.screen.blit(label_surface, (background.x + 5, background.y + 2))
+        self.screen.blit(label_surface, (background.x + 8, background.y + 3))
         if panel_name == "camera_front" and session.manual_control_active:
-            self._blit_text("MANUAL CONTROL - W A S D / arrow keys", "normal", C["text_warning"],
-                            (area.centerx, area.bottom - 6), anchor="midbottom")
+            self._badge("Manual control - W A S D / arrow keys", C["badge_warning"],
+                        (area.centerx, area.bottom - 8), anchor="midbottom")
         if panel_name == "camera_front" and session.talking_to:
-            self._blit_text("Talking to {}...".format("passenger" if session.talking_to == "passenger" else "people outside"),
-                            "normal", C["text_warning"], (area.centerx, area.y + 6), anchor="midtop")
+            text = "Talking to {}".format("the passenger" if session.talking_to == "passenger" else "people outside")
+            self._badge(text, C["badge_normal"], (area.centerx, area.y + 8), anchor="midtop")
 
     def _draw_map(self, rect: Rect, session: ScenarioSession) -> None:
         content = self._panel(rect, settings.PANEL_TITLES.get("map"))
@@ -431,7 +460,7 @@ class OperatorInterface:
         x = content.x + 4
         button_height = int(self.fonts["small"].get_height() * 1.7)
         for action in actions.actions_in_group("map", session.scenario.hidden_buttons):
-            width = self.fonts["small"].size(action.label)[0] + 14
+            width = self.fonts["small"].size(action.label)[0] + 24
             self._action_button(Rect(x, content.y + 4, width, button_height), action, session, font="small")
             x += width + 4
         gps = "{:.{d}f}°, {:.{d}f}°".format(state.latitude, state.longitude, d=settings.GPS_DECIMALS)
@@ -452,40 +481,48 @@ class OperatorInterface:
         content = self._panel(rect, settings.PANEL_TITLES.get("route"))
         message = session.route_message()
         if message:
-            for index, line in enumerate(self._wrap(message, "title", content.width)):
-                self._blit_text(line, "title", C["text"],
-                                (content.centerx, content.y + 8 + index * self.fonts["title"].get_height()), anchor="midtop")
+            for index, line in enumerate(self._wrap(message, "normal", content.width)):
+                self._blit_text(line, "normal", C["text"],
+                                (content.x, content.y + 4 + index * (self.fonts["normal"].get_height() + 2)))
             return
         traveled, total = session.route_progress()
         minutes_done, minutes_total = session.route_minutes()
-        fraction = 0.0 if total <= 0 else traveled / total
-        bar = Rect(content.x + 6, content.y + 4, content.width - 12, max(10, content.height // 4))
+        fraction = 0.0 if total <= 0 else min(1.0, traveled / total)
+        bar = Rect(content.x, content.y + 4, content.width, max(8, content.height // 5))
         pygame.draw.rect(self.screen, C["progress_back"], bar, border_radius=bar.height // 2)
-        fill = Rect(bar.x, bar.y, int(bar.width * fraction), bar.height)
-        if fill.width > 0:
+        fill = Rect(bar.x, bar.y, max(bar.height, int(bar.width * fraction)), bar.height)
+        if fraction > 0:
             pygame.draw.rect(self.screen, C["progress_fill"], fill, border_radius=bar.height // 2)
-        y = bar.bottom + 6
+        y = bar.bottom + 8
+        self._blit_text("{:.0f}%".format(fraction * 100), "title", C["text"], (bar.x, y))
         self._blit_text(minutes_text(minutes_done, minutes_total), "normal", C["text"],
                         (bar.right, y), anchor="topright")
-        self._blit_text(miles_text(traveled, total), "normal", C["text"],
+        self._blit_text(miles_text(traveled, total), "normal", C["text_dim"],
                         (bar.right, y + self.fonts["normal"].get_height() + 2), anchor="topright")
-        self._blit_text("{:.0f}%".format(fraction * 100), "normal", C["text"], (bar.x, y))
 
     def _draw_actions(self, rect: Rect, session: ScenarioSession) -> None:
         content = self._panel(rect, settings.PANEL_TITLES.get("actions"))
         hidden = session.scenario.hidden_buttons
-        left = Rect(content.x, content.y, int(content.width * 0.55), content.height)
-        right = Rect(left.right + 8, content.y, content.right - left.right - 8, content.height)
+        left = Rect(content.x, content.y, int(content.width * 0.56), content.height)
+        right = Rect(left.right + 10, content.y, content.right - left.right - 10, content.height)
 
-        # Command list (left).
-        line = int(self.fonts["normal"].get_height() * 1.45)
-        for index, action in enumerate(actions.actions_in_group("actions", hidden)):
-            self._action_button(Rect(left.x, left.y + index * line, left.width, line - 3), action, session)
+        # Command list (left): one button per command; toggles carry a switch.
+        # Rows get tighter when the panel is short (small windows).
+        commands = [(action, self._command_lines(action, left.width))
+                    for action in actions.actions_in_group("actions", hidden)]
+        line = self.fonts["normal"].get_height()
+        text_height = sum(len(lines) * line for _, lines in commands)
+        padding = max(2, min(12, (left.height - text_height - 5 * len(commands)) // max(1, len(commands))))
+        y = left.y
+        for action, lines in commands:
+            height = len(lines) * line + padding
+            self._command_row(Rect(left.x, y, left.width, height), lines, action, session)
+            y += height + 5
 
         # Driving buttons (right).
         drive = actions.actions_in_group("drive", hidden)
         end_buttons = actions.actions_in_group("end", hidden)
-        end_height = int(self.fonts["normal"].get_height() * 1.7)
+        end_height = int(self.fonts["normal"].get_height() * 1.8)
         available = right.height - (end_height + 10 if end_buttons else 0)
         gap = 8
         height = min(int(self.fonts["title"].get_height() * 2.0), (available - gap * (len(drive) - 1)) // max(1, len(drive)))
@@ -493,19 +530,74 @@ class OperatorInterface:
             self._action_button(Rect(right.x, right.y + index * (height + gap), right.width, height), action, session,
                                 font="title")
         for action in end_buttons:
-            width = self.fonts["normal"].size(action.label)[0] + 24
+            width = self.fonts["normal"].size(action.label)[0] + 28
             self._action_button(Rect(content.right - width, content.bottom - end_height, width, end_height),
                                 action, session)
 
-        # Fading feedback text (bottom left) -- replaces popups for every click.
-        y = content.bottom - 4
+        # Fading feedback messages (bottom left) -- instead of a popup for every click.
+        bottom = content.bottom
         for text, opacity in reversed(session.active_feedback()):
-            for wrapped in reversed(self._wrap(text, "small", left.width)):
-                surface = self._text(wrapped, "small", C["text_warning"]).copy()
+            wrapped = self._wrap(text, "small", left.width - 16)
+            box = Rect(content.x, 0, left.width, len(wrapped) * self.fonts["small"].get_height() + 10)
+            box.bottom = bottom
+            toast = pygame.Surface(box.size, pygame.SRCALPHA)
+            pygame.draw.rect(toast, C["dialog"] + (int(235 * opacity),), toast.get_rect(), border_radius=6)
+            for index, part in enumerate(wrapped):
+                surface = self._text(part, "small", C["text_warning"]).copy()
                 surface.set_alpha(int(255 * opacity))
-                y -= surface.get_height()
-                self.screen.blit(surface, (content.x, y))
-            y -= 4
+                toast.blit(surface, (8, 5 + index * self.fonts["small"].get_height()))
+            self.screen.blit(toast, box.topleft)
+            bottom = box.y - 4
+
+    def _command_lines(self, action: actions.Action, width: int) -> List[str]:
+        """A command's label wrapped to the row (at most three lines)."""
+        room = width - 24 - (self._switch_size()[0] + 10 if action.kind == "toggle" else 0)
+        lines = self._wrap(action.label, "normal", room)
+        if len(lines) > 3:
+            lines = lines[:2] + [self._fit_text(" ".join(lines[2:]), "normal", room)]
+        return lines or [""]
+
+    def _command_row(self, rect: Rect, lines: List[str], action: actions.Action, session: ScenarioSession) -> None:
+        """A command-list button: label left; a switch for toggles, a chevron for menus."""
+        enabled = (action.is_enabled(session) if action.is_enabled else True) and not self.offline
+        toggled = action.is_on(session) if action.is_on else False
+        hover = enabled and rect.collidepoint(self._hover)
+        color = C["button_hover"] if hover else C["button"]
+        pygame.draw.rect(self.screen, color if enabled else C["button_disabled"], rect,
+                         border_radius=settings.CORNER_RADIUS)
+        text_color = C["button_text"] if enabled else C["text_dim"]
+        line = self.fonts["normal"].get_height()
+        top = rect.centery - len(lines) * line // 2
+        for index, text in enumerate(lines):
+            self._blit_text(text, "normal", text_color, (rect.x + 12, top + index * line))
+        if action.kind == "toggle":
+            self._switch((rect.right - 10, rect.centery), toggled, enabled)
+        elif action.action_id in ("emergency_services", "fleet_services"):   # opens a menu
+            x, y, size = rect.right - 16, rect.centery, max(4, line // 4)
+            pygame.draw.lines(self.screen, C["text_dim"], False,
+                              [(x - size, y - size), (x, y), (x - size, y + size)], 2)
+
+        def press() -> None:
+            result = action.handler(session)
+            if result in actions.DIALOGS:
+                self.open_dialog = result
+        release = (lambda: action.release(session)) if action.kind == "hold" and action.release else None
+        self._hotspots.append(Hotspot(rect, press if enabled else (lambda: None), release))
+
+    def _switch_size(self) -> Tuple[int, int]:
+        height = max(16, int(self.fonts["normal"].get_height() * 1.0))
+        return int(height * 1.85), height
+
+    def _switch(self, midright: Tuple[int, int], on: bool, enabled: bool = True) -> None:
+        """An on/off switch (pill track with a round knob)."""
+        width, height = self._switch_size()
+        track = Rect(0, 0, width, height)
+        track.midright = midright
+        color = C["switch_on"] if on else C["switch_off"]
+        pygame.draw.rect(self.screen, color if enabled else C["button_disabled"], track, border_radius=height // 2)
+        radius = height // 2 - 2
+        knob_x = track.right - height // 2 if on else track.x + height // 2
+        pygame.draw.circle(self.screen, C["switch_knob"], (knob_x, track.centery), radius)
 
     # =====================================================================
     # Overlays
@@ -542,16 +634,30 @@ class OperatorInterface:
         return box
 
     def _dialog_frame(self, box: Rect, title: str, on_close: Callable[[], None]) -> Rect:
-        shadow = box.move(4, 4)
-        pygame.draw.rect(self.screen, (0, 0, 0), shadow, border_radius=8)
-        pygame.draw.rect(self.screen, C["dialog"], box, border_radius=8)
-        pygame.draw.rect(self.screen, C["text_dim"], box, 2, border_radius=8)
-        self._blit_text(title, "title", C["panel_title"], (box.centerx, box.y + 8), anchor="midtop")
-        size = self.fonts["title"].get_height()
-        close = Rect(box.right - size - 8, box.y + 6, size, size)
-        self._button(close, "X", "normal", on_close, layer=2)
+        radius = settings.CORNER_RADIUS + 2
+        shadow_rect = box.inflate(10, 10).move(0, 4)
+        shadow = pygame.Surface(shadow_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(shadow, (0, 0, 0, 90), shadow.get_rect(), border_radius=radius + 4)
+        self.screen.blit(shadow, shadow_rect.topleft)
+        pygame.draw.rect(self.screen, C["dialog"], box, border_radius=radius)
+        pygame.draw.rect(self.screen, C["panel_border"], box, 1, border_radius=radius)
+        self._blit_text(title, "title", C["panel_title"], (box.x + 14, box.y + 12))
+        size = self.fonts["title"].get_height() + 6
+        close = Rect(box.right - size - 8, box.y + 8, size, size)
+        self._close_button(close, on_close, layer=2)
         self._hotspots.append(Hotspot(box, lambda: None, layer=1))   # clicks inside do not fall through
-        return Rect(box.x + 12, box.y + size + 16, box.width - 24, box.height - size - 24)
+        top = box.y + size + 16
+        return Rect(box.x + 14, top, box.width - 28, box.bottom - top - 12)
+
+    def _close_button(self, rect: Rect, on_close: Callable[[], None], layer: int = 0) -> None:
+        """A standard close button: an X icon that highlights on hover."""
+        if rect.collidepoint(self._hover):
+            pygame.draw.rect(self.screen, C["row_hover"], rect, border_radius=6)
+        inset = rect.width // 3
+        cross = rect.inflate(-2 * inset, -2 * inset)
+        pygame.draw.line(self.screen, C["text"], cross.topleft, cross.bottomright, 2)
+        pygame.draw.line(self.screen, C["text"], cross.bottomleft, cross.topright, 2)
+        self._hotspots.append(Hotspot(rect, on_close, None, layer))
 
     def _draw_dialog(self, session: ScenarioSession, name: str) -> None:
         dialog = actions.DIALOGS[name]
@@ -595,7 +701,7 @@ class OperatorInterface:
             x = content.x + column * column_width
             y = content.y + row * line
             value = values.get(key, "")
-            self._blit_text(label + ":", "small", C["text"], (x, y))
+            self._blit_text(label, "small", C["text_dim"], (x, y))
             text = self._fit_text(self._format(value) + unit, "small", column_width - label_width - 4)
             self._blit_text(text, "small", self._value_color(key, value), (x + label_width, y))
 
@@ -649,23 +755,19 @@ class OperatorInterface:
     # =====================================================================
 
     def _action_button(self, rect: Rect, action: actions.Action, session: ScenarioSession, font: str = "normal") -> None:
+        if action.style == "link":
+            self._command_row(rect, self._command_lines(action, rect.width), action, session)
+            return
         enabled = action.is_enabled(session) if action.is_enabled else True
         toggled = action.is_on(session) if action.is_on else False
-        label = action.label
-        if action.kind == "toggle" and action.style == "link":
-            label = ("[x] " if toggled else "[  ] ") + label
-        if action.kind == "hold" and session.talking_to and action.action_id.endswith(session.talking_to.replace("external", "externally")):
-            toggled = True
 
         def press() -> None:
             result = action.handler(session)
             if result in actions.DIALOGS:
                 self.open_dialog = result
         release = (lambda: action.release(session)) if action.kind == "hold" and action.release else None
-        style = "toggled" if toggled and action.style != "link" else action.style
-        self._button(rect, label, style, press if enabled else (lambda: None), release, font=font,
-                     enabled=enabled, highlighted=toggled and action.style == "link",
-                     align="left" if action.style == "link" else "center")
+        self._button(rect, action.label, "toggled" if toggled else action.style, press if enabled else (lambda: None),
+                     release, font=font, enabled=enabled)
 
     def _button(self, rect: Rect, label: str, style: str, on_press: Callable[[], None],
                 on_release: Optional[Callable[[], None]] = None, font: str = "normal", layer: int = 0,
@@ -674,7 +776,7 @@ class OperatorInterface:
         hover = rect.collidepoint(self._hover) and enabled
         colors = {
             "normal": ("button", "button_hover"),
-            "link": ("panel", "button_hover"),
+            "link": ("button", "button_hover"),
             "danger": ("button_danger", "button_danger_hover"),
             "estop": ("button_danger", "button_danger_hover"),
             "primary": ("button_primary", "button_primary_hover"),
@@ -683,17 +785,18 @@ class OperatorInterface:
             "no": ("button_no", "button_no"),
         }.get(style, ("button", "button_hover"))
         color = C[colors[1] if hover else colors[0]] if enabled else C["button_disabled"]
-        if style == "estop":    # the big oval emergency-stop button
-            pygame.draw.ellipse(self.screen, color, rect)
-            pygame.draw.ellipse(self.screen, C["panel_border"], rect, 2)
-        else:
-            pygame.draw.rect(self.screen, color, rect, border_radius=5)
-            if style != "link":
-                pygame.draw.rect(self.screen, C["panel_border"], rect, 2, border_radius=5)
-        text_color = C["text_warning"] if highlighted else C["button_text"]
-        text = self._fit_text(label, font, rect.width - 10)
+        radius = settings.CORNER_RADIUS
+        if hover and style in ("yes", "no", "toggled"):     # no separate hover color: lighten
+            color = tuple(min(255, channel + 25) for channel in color)
+        pygame.draw.rect(self.screen, color, rect, border_radius=radius)
+        if style in ("normal", "link") and enabled:
+            pygame.draw.rect(self.screen, C["button_border"], rect, 1, border_radius=radius)
+        if style in ("estop", "toggled") and enabled:     # emergency stop / switched on: white ring
+            pygame.draw.rect(self.screen, (255, 255, 255), rect.inflate(-6, -6), 2, border_radius=radius - 2)
+        text_color = C["text_warning"] if highlighted else (C["button_text"] if enabled else C["text_dim"])
+        text = self._fit_text(label, font, rect.width - 16)
         if align == "left":
-            self._blit_text(text, font, text_color, (rect.x + 6, rect.centery), anchor="midleft")
+            self._blit_text(text, font, text_color, (rect.x + 10, rect.centery), anchor="midleft")
         else:
             self._blit_text(text, font, text_color, rect.center, anchor="center")
         self._hotspots.append(Hotspot(rect, on_press, on_release, layer))

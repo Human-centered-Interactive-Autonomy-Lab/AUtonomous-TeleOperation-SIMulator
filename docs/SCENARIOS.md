@@ -41,7 +41,7 @@ python -m autosim --scenarios path/to/my_battery.csv
 | `lights`           | street lights: `auto` (on at night), `off`, `low`, `high`        | `auto`             |
 | `target_speed_mph` | cruising speed of the automated vehicle                          | 20                 |
 | `start_stopped`    | `yes` = the car stands still at the start                        | no                 |
-| `route_end`        | `customer`: after the drop-off, drive on and pick up the next passenger; `depot`: stay parked | `customer`         |
+| `route_end`        | `customer`: after the drop-off, drive on and pick up the next passenger; `fleet`: stay pulled over and wait for fleet assistance (`depot` also works) | `customer`         |
 
 (*) The default scene keeps the loaded map, starts at spawn point 0 and drives
 400 m along the road.
@@ -121,7 +121,7 @@ judges responses. It records answers, button presses and their times
 | Column              | Meaning                                                            |
 |---------------------|--------------------------------------------------------------------|
 | `passenger_message` | A passenger-talk notification appears. On Accept, this is said.    |
-| `passenger_reply`   | Said after the operator talks to the passenger (push-to-talk).     |
+| `passenger_reply`   | Said when the operator stops talking to the passenger.             |
 | `external_reply`    | Said after the operator talks to people outside.                   |
 
 Each can be plain text or a **file in `scenarios/audio/`**. An audio file
