@@ -62,6 +62,6 @@ def test_theme_meets_wcag_aa(theme):
     assert not failures, "{}: {}".format(theme, "; ".join(failures))
 
 
-def test_default_theme_is_high_contrast():
-    assert settings.THEME == "high_contrast"
-    assert settings.COLORS["panel"] == settings._THEMES["high_contrast"]["panel"]
+def test_default_theme_is_blue():
+    assert settings.THEME == "blue"
+    assert settings.COLORS["panel"] == settings._THEMES["blue"]["panel"]
