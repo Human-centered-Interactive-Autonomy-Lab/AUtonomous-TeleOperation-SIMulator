@@ -128,9 +128,6 @@ DEFAULT_VIDEO_RESOLUTION_SCALE: float = 1.0
 # operating ranges).  The column name in the scenario CSV is the key.
 
 DEFAULT_VEHICLE_STATUS: Dict[str, object] = {
-    # --- route --------------------------------------------------------------
-    "route_total_miles":      "uniform:3,15",
-    "route_progress_percent": "uniform:0,75",
     # --- powertrain ---------------------------------------------------------
     "battery_percent":        "uniform:40,95",
     "battery_temp_f":         "uniform:70,95",

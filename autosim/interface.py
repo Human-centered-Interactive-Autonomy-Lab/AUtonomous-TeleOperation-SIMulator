@@ -48,6 +48,12 @@ MANUAL_KEYS: Dict[str, Tuple[int, ...]] = {
 }
 
 
+def _clock(minutes: float) -> str:
+    """1.75 -> '1:45'."""
+    seconds = int(round(max(0.0, minutes) * 60))
+    return "{}:{:02d}".format(seconds // 60, seconds % 60)
+
+
 class Hotspot:
     """A clickable rectangle painted this frame."""
 
@@ -449,9 +455,9 @@ class OperatorInterface:
         if fill.width > 0:
             pygame.draw.rect(self.screen, C["progress_fill"], fill, border_radius=bar.height // 2)
         y = bar.bottom + 6
-        self._blit_text("{:.0f} of {:.0f} min".format(minutes_done, minutes_total), "normal", C["text"],
+        self._blit_text("{} of {} min".format(_clock(minutes_done), _clock(minutes_total)), "normal", C["text"],
                         (bar.right, y), anchor="topright")
-        self._blit_text("{:.1f} of {:.1f} mi".format(traveled, total), "normal", C["text"],
+        self._blit_text("{:.2f} of {:.2f} mi".format(traveled, total), "normal", C["text"],
                         (bar.right, y + self.fonts["normal"].get_height() + 2), anchor="topright")
         self._blit_text("{:.0f}%".format(fraction * 100), "normal", C["text"], (bar.x, y))
 

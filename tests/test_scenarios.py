@@ -29,8 +29,6 @@ def test_minimal_file_uses_defaults(tmp_path):
     values = scenario.resolve_status(random.Random(0))
     for key in ("tire_fl_psi", "tire_fr_psi", "tire_rl_psi", "tire_rr_psi"):
         assert 30 <= values[key] <= 34
-    assert 3 <= values["route_total_miles"] <= 15
-    assert 0 <= values["route_progress_percent"] <= 75
     assert values["software_status"] == "Good"
     assert scenario.scene.map_name is None
 
