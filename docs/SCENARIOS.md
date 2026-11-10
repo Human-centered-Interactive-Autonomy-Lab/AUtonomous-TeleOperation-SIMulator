@@ -58,8 +58,6 @@ python -m autosim --scenarios path/to/my_battery.csv
 
 | Column                                                                   | Default             |
 |--------------------------------------------------------------------------|---------------------|
-| `route_total_miles`                                                      | `uniform:3,15`      |
-| `route_progress_percent`                                                 | `uniform:0,75`      |
 | `battery_percent`                                                        | `uniform:40,95`     |
 | `battery_temp_f`                                                         | `uniform:70,95`     |
 | `motor_temp_f`                                                           | `uniform:120,170`   |

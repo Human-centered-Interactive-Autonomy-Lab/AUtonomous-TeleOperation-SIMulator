@@ -27,7 +27,6 @@ from autosim.simulation import DrivingMode, Simulation, VehicleState
 from autosim.tasks import TaskContext, TaskScript, build_tasks
 
 METERS_PER_MILE = 1609.344
-ASSUMED_TRIP_SPEED_MPH = 25.0   # used to show remaining trip time in the Route panel
 TASK_STOP_PREFIX = "Task:"      # stop reasons from task logic start with this (no extra alert)
 
 
@@ -101,14 +100,12 @@ class ScenarioSession:
         self.talking_to = ""                               # push-to-talk target
         self.end_requested = False
 
-        self.route_start_progress_m = 0.0
-        self.route_total_m = 0.0
         self.route_complete = False                        # the current trip's passenger was dropped off
         self.route_completed_at: Optional[float] = None    # elapsed seconds, while waiting to drive on
         self.trip_number = 1                               # 1 = the scenario's own route
         self.trips_completed = 0
-        self.trip_start_m = 0.0                            # route_traveled_m where a later trip began
-        self.trip_length_m = 0.0                           # its length (0 for the first trip)
+        self.trip_start_m = 0.0                            # route_traveled_m where the current trip began
+        self.trip_started_at = 0.0                         # elapsed seconds when it began
         self._last_trip_leg = "destination"
 
         self.counts: Dict[str, int] = {}
@@ -135,9 +132,6 @@ class ScenarioSession:
         """Called once the world is loaded and the interface is about to show."""
         self.start_time = time.monotonic()
         self.status_values = self.scenario.resolve_status(self.rng)
-        self.route_total_m = float(self.status_values.get("route_total_miles", 5.0)) * METERS_PER_MILE
-        percent = float(self.status_values.get("route_progress_percent", 0.0))
-        self.route_start_progress_m = self.route_total_m * min(max(percent, 0.0), 100.0) / 100.0
         for alert in self.scenario.alerts:
             self.add_alert(alert.text, alert.severity, log=False)
         self.log("scenario_start", scene=self.scenario.scene.source,
@@ -383,21 +377,30 @@ class ScenarioSession:
     # Values the interface draws
     # ======================================================================
 
+    def _trip_meters(self) -> Tuple[float, float]:
+        """(metres driven, metres left) of the current trip, along the route the car is following."""
+        state = self.vehicle_state
+        driven = max(0.0, state.route_traveled_m - self.trip_start_m)
+        left = 0.0 if self.route_complete else max(0.0, state.route_length_m - state.route_traveled_m)
+        return driven, left
+
     def route_progress(self) -> Tuple[float, float]:
-        """(miles travelled, total miles) for the Route panel."""
-        if self.trip_number > 1:   # later trips: their real length, from the pickup
-            traveled, total = self.vehicle_state.route_traveled_m - self.trip_start_m, self.trip_length_m
-        else:
-            traveled, total = self.route_start_progress_m + self.vehicle_state.route_traveled_m, self.route_total_m
-        if self.route_complete:
-            traveled = total
-        traveled = max(0.0, min(traveled, total))
-        return traveled / METERS_PER_MILE, total / METERS_PER_MILE
+        """(miles travelled, total miles) of the current trip for the Route panel: the
+        real route, so the bar moves exactly as the car does (detours included)."""
+        driven, left = self._trip_meters()
+        return driven / METERS_PER_MILE, (driven + left) / METERS_PER_MILE
 
     def route_minutes(self) -> Tuple[float, float]:
-        """(minutes elapsed, total minutes) of the trip at a nominal trip speed."""
-        traveled, total = self.route_progress()
-        return traveled / ASSUMED_TRIP_SPEED_MPH * 60, total / ASSUMED_TRIP_SPEED_MPH * 60
+        """(minutes so far, estimated total minutes) of the current trip.  The time
+        left uses the average speed so far (stops included) once there is one,
+        otherwise the AV's cruising speed."""
+        driven, left = self._trip_meters()
+        seconds = max(0.0, self.elapsed - self.trip_started_at)
+        if seconds >= 10.0 and driven >= 20.0:
+            speed_mps = driven / seconds
+        else:
+            speed_mps = max(1.0, self.scenario.target_speed_mph) * METERS_PER_MILE / 3600.0
+        return seconds / 60.0, (seconds + left / speed_mps) / 60.0
 
     def route_message(self) -> str:
         """Text shown in the Route panel instead of the progress bar ("" = show progress)."""
@@ -461,8 +464,9 @@ class ScenarioSession:
                 self.trip_number += 1
                 self.route_complete = False
                 self.trip_start_m = state.route_traveled_m
-                self.trip_length_m = max(1.0, state.route_length_m - state.route_traveled_m)
-                self.log("passenger_picked_up", trip=self.trip_number, trip_length_m=round(self.trip_length_m))
+                self.trip_started_at = self.elapsed
+                self.log("passenger_picked_up", trip=self.trip_number,
+                         trip_length_m=round(state.route_length_m - state.route_traveled_m))
         if state.collision_count > self._last_collisions:
             self._last_collisions = state.collision_count
             self.log("collision", other=state.last_collision_with, total=state.collision_count)
