@@ -364,11 +364,266 @@ How to test in CARLA:
 --------------------------------------------------------------------------
 TODO / NEXT TIME
 --------------------------------------------------------------------------
-[ ] Test the route-end pull-over and passenger drop-off in CARLA (#2).
-[ ] Decide on stop-sign / yielding behavior, then implement it.
+[*] Test the route-end pull-over and passenger drop-off in CARLA (#2).
+    (done 2026-11-09; bugs found and fixed, see that entry)
+[*] Decide on stop-sign / yielding behavior, then implement it. (2026-11-09)
 [ ] Fix README: Python 3.7-3.10 note, use "python -m pip".
 [ ] Improve the "NOT CONNECTED TO CARLA" message to show the real reason.
-[ ] Fix pop-up message by action buttons to appear next to the actions.
-[ ] Ensure that the "Return to Depot After This Job" button works.
+[*] Fix pop-up message by action buttons to appear next to the actions.
+    (2026-11-09: pop-ups now in the top-right corner of the Actions panel)
+[*] Ensure that the "Return to Depot After This Job" button works.
+    (2026-11-09: replaced by "Pull over and wait for fleet assistance")
+[ ] Fix any more bugs and errors.
+(Open items carry over to the TODO list of the 2026-11-09 entry below.)
+==========================================================================
+
+
+==========================================================================
+AUTOSIM WORK LOG - 2026-11-09
+Project: AUTOSIM (AUtonomous TeleOperation SIMulator)
+Repo: https://github.com/Human-centered-Interactive-Autonomy-Lab/AUtonomous-TeleOperation-SIMulator
+Local folder: C:\Carla\AUtonomous-TeleOperation-SIMulator
+Setup: Windows, Python 3.10.11, CARLA 0.9.15 (packaged)
+Pull requests: #2 to #18, all merged into main
+==========================================================================
+
+SUMMARY
+-------
+- Fixed the drop-off passenger / "next customer" walking forever.
+- New: after a drop-off the AV drives on, picks up the next passenger,
+  and drives them to a destination (repeats until End supervision).
+- New: the AV obeys speed limits, stop signs and right of way, and says
+  why it is standing still.
+- Route progress bar now shows the car's real progress.
+- The same person who is picked up is the one dropped off.
+- Operator interface redesigned: buttons, switches, badges, readable
+  colors (blue theme), pop-ups out of the middle of the screen.
+- "Return to depot" replaced by "Pull over and wait for fleet assistance".
+- Pull-overs never stop inside an intersection; detours never drive
+  through the obstacle; talk buttons are click on / click off.
+- Remote-link delay and frame rate: three settings at the top of
+  settings.py, tested; fixed a frame-rate bug (20 fps showed 15).
+- New heavy-traffic test; fixed false "cross traffic" stops in it.
+- 43 automated tests now (was 25).
+
+How I work with Claude now (GitHub is connected):
+  Claude makes a branch, pushes it and opens a pull request; I test it in
+  CARLA on my machine, then merge it on GitHub and run "git pull".
+  Test a branch before merging:
+    git fetch origin
+    git switch <branch-name>
+  Back to the normal version:
+    git switch main
+    git pull
+
+
+--------------------------------------------------------------------------
+1. PASSENGER / NEXT CUSTOMER WALKING FOREVER  (#3)
+--------------------------------------------------------------------------
+Symptom: after the drop-off a pedestrian kept walking and never vanished.
+Cause:
+  - The "next customer" pedestrian was placed relative to the route's
+    original lane. Since the car now pulls over into the rightmost lane,
+    its target was beside/inside the car, so it walked into the car
+    forever.
+  - Scripted pedestrians had no idea they were blocked.
+Fix:
+  - Pedestrians that do not move for 2 s (WALKER_STUCK_SECONDS) stop
+    instead of pushing forever. A blocked drop-off passenger skips ahead
+    on their walk, then disappears. Drop-off time limit 20 s.
+  (The next-customer pedestrian was later replaced by the pickup, #4.)
+
+
+--------------------------------------------------------------------------
+2. PICK UP THE NEXT PASSENGER AFTER A DROP-OFF  (#4, #7)
+--------------------------------------------------------------------------
+What happens after a route now:
+  1) Drop-off: passenger gets out on the curb side and walks away.
+  2) Car waits 5 s at the curb (hazards on).
+     Route panel: "Route complete. Picking up next passenger."
+  3) Drives on 150-300 m (random). Route panel: "Driving to pick up the
+     next passenger."
+  4) A pedestrian waits on the sidewalk; the car pulls over next to them
+     (same safe pull-over). Mode "Passenger boarding": the rear-right
+     door opens, they walk to it and disappear (on board).
+  5) Drives them about 400 m, then drop-off again. Repeats until
+     End supervision.
+  - The person who gets out is the SAME person who got in (#7). The
+    terminal names them: "Passenger on board (walker.pedestrian.0010)",
+    "Passenger getting out (walker.pedestrian.0010)".
+  - E-STOP / manual control during a pickup works; Resume AV continues.
+Data: events driving_to_pickup, passenger_pickup_started,
+  passenger_picked_up (all with a trip number); summary columns
+  trips_completed, passengers_picked_up.
+Settings (settings.py): PICK_UP_NEXT_PASSENGER (True), NEXT_PICKUP_DELAY_
+  SECONDS (5), NEXT_PICKUP_MIN/MAX_METERS (150/300), NEXT_TRIP_LENGTH_
+  METERS (400), PASSENGER_BOARDING_TIMEOUT_SECONDS (15).
+
+
+--------------------------------------------------------------------------
+3. TRAFFIC RULES IN AV MODE  (#5, #15, #18)
+--------------------------------------------------------------------------
+Problem: the AV ran stop signs and did not yield. CARLA's BasicAgent only
+  stops for red lights and a car directly ahead. It also drove 20 mph on
+  Town10's 30 km/h (18.6 mph) roads.
+Now:
+  - Speed never above the road's speed limit.
+  - Slows to 12 mph or less before intersections without lights.
+  - Stop signs: full stop at the line, waits 2 s, then checks traffic.
+  - Right of way at intersections without lights: waits for a car that is
+    really crossing -- inside the intersection on/near our path, or driving
+    in a lane that leads into it and arrives within 4 s. Oncoming traffic
+    only counts when turning left. Waits AT THE LINE (not 8-12 m early).
+  - Waiting more than 15 s at an intersection: stops and asks the
+    operator ("Intersection blocked by ..."); Resume AV crosses.
+  - Red lights: handled by BasicAgent as before.
+  - The speed panel says why the AV is standing still:
+      "AV mode - stop sign" / "- cross traffic" / "- red light" /
+      "- traffic" (queued behind a waiting car) / "- vehicle ahead" /
+      "- pedestrian".
+  - Stuck behind a lone stopped car or a pedestrian for 30 s
+    (AV_BLOCKED_ASK_SECONDS): stops and asks the operator. Queues at red
+    lights are waited out.
+Bug found in heavy traffic (#18): it stopped for "cross traffic" that was
+  not there ("Intersection blocked by c3 / mustang"). Cause: any car inside
+  a big circle around the intersection counted (cars waiting at their own
+  red line, parked cars, cars driving away). Fixed by using CARLA's road
+  network instead of the circle.
+Data: av_waiting / av_waiting_end events with the reason.
+Switches (settings.py): OBEY_SPEED_LIMITS, OBEY_STOP_SIGNS,
+  YIELD_AT_INTERSECTIONS (all True; turn off for a study where the AV
+  breaks a rule on purpose).
+Known limits: no oncoming check before an unprotected left on green; 4-way
+  stops wait until clear (not strict arrival order).
+
+
+--------------------------------------------------------------------------
+4. ROUTE PROGRESS BAR  (#6, #8, #9)
+--------------------------------------------------------------------------
+Problem: the bar did not match the drive (first trip showed 41% at the
+  drop-off while the second showed 100%).
+Cause: it used made-up status values (route_total_miles 3-15 mi,
+  route_progress_percent 0-75%) plus the real few hundred metres on top.
+Fix: bar, miles and minutes follow the real route of the current trip
+  (detours included; restarts at 0 after a pickup). Time left uses the
+  average speed so far. Format "2 of 13 min" / "0.7 of 5.4 mi", rounded so
+  it never shows more done than the total.
+Note: routes are only ~300-400 m (0.2 mi, about 1 min), so the numbers are
+  small (e.g. "0 of 1 min", "0.1 of 0.2 mi"). Longer trips need longer
+  routes (route.length_m in a scene, NEXT_TRIP_LENGTH_METERS).
+
+
+--------------------------------------------------------------------------
+5. OPERATOR INTERFACE  (#10, #11, #13, #14, #16)
+--------------------------------------------------------------------------
+- Command list: every entry is a real button; on/off items have a switch
+  that also says "On"/"Off" (instead of "[x]"); menus show ">".
+- E-STOP is a red ringed button (not an oval); Manual Control turns blue
+  with a ring while on.
+- Speed panel: big number + "mph"; the mode and hazard lights as badges.
+- Dialogs have a proper close icon.
+- Pop-ups (notifications, button feedback, "Manual: WASD / arrow keys",
+  "Talking to passenger") are in the TOP-RIGHT CORNER OF THE ACTIONS
+  PANEL -- nothing covers the middle of the screen or the front camera.
+  Manual control now gives one pop-up, not two.
+- Colors: measured against the WCAG accessibility standard (4.5:1 for
+  text, 3:1 for button edges). All old themes failed (buttons barely
+  visible against panels, white on orange 2.9:1, white on green 3.3:1).
+  Every theme now passes; tests/test_colors.py checks it.
+- Theme: THEME in settings.py = "blue" (default), "high_contrast"
+  (dark text on white), "light" or "dark".
+- Font: Segoe UI on Windows; slightly larger text.
+
+
+--------------------------------------------------------------------------
+6. BUTTON / BEHAVIOR CHANGES  (#10, #12)
+--------------------------------------------------------------------------
+- "Return to depot after this job" -> "Pull over and wait for fleet
+  assistance after this job": after the drop-off the car stays at the
+  curb with hazards on ("Route complete. Waiting for fleet assistance.").
+  Scenario column route_end: "customer" or "fleet" ("depot" still works).
+  Logged action name changed: return_to_depot -> wait_for_fleet.
+- Talk to passenger / Talk externally: click to start, click again to
+  stop (no holding).
+- Pull Over never stops or drifts to the curb inside an intersection: it
+  crosses it in its lane (obeying the rules) and stops 18 m after it.
+- Bug: answering "Yes - closed" made the car drive into the cones (all
+  construction scenarios). Cause: the detour went straight through the
+  closure, and resuming treated the cones as "checked by the operator".
+  Fix: every detour is checked for obstacles (requested turn, then the
+  other turn, then straight); if all are blocked the car stays stopped:
+  "No detour around the ... from here: turn around with Manual Control".
+  After a detour the car still stops for obstacles.
+
+
+--------------------------------------------------------------------------
+7. REMOTE-LINK DELAY AND FRAME RATE  (#12)
+--------------------------------------------------------------------------
+Top of autosim/settings.py (section 0, QUICK SETTINGS):
+  INPUT_DELAY_SECONDS = 0.0   # button press -> the car reacts
+  VIDEO_DELAY_SECONDS = 0.0   # the car's cameras -> my screen
+  VIDEO_FPS = 20.0            # frames per second on screen (max 30)
+  Button press -> seeing the result = input delay + video delay.
+  Change, save, restart AUTOSIM. (Command line --input-delay,
+  --video-delay, --video-fps still override.)
+- The speed, mode, map and progress are now delayed WITH the video
+  (TELEMETRY_FOLLOWS_VIDEO = True); before, the speed dropped to 0 before
+  the video showed the car stopping. Data/logic use the real values.
+- Bug fixed: 20 fps actually showed 15 fps (also 25 -> 15), because
+  CARLA's cameras give 30 fps and every other frame was kept.
+Measured (fake car, controlled clock):
+  input/video/fps     car reacts   screen shows it   frames/s
+  0.5 / 0.3 / 20      0.53 s       0.87 s            20
+  0.5 / 0.3 / 10      0.53 s       0.87 s            10
+  1.0 / 0.5 / 5       1.03 s       1.57 s            5
+Tests: tests/test_remote_link.py.
+
+
+--------------------------------------------------------------------------
+8. HEAVY-TRAFFIC TEST  (#17)
+--------------------------------------------------------------------------
+  python -m autosim --scenarios scenarios/heavy_traffic_battery.csv --participant TRAFFIC --wait-time 0
+- 800 m route with 60 cars and 40 pedestrians; day, rain, night
+  (scene scenarios/scenes/heavy_traffic.json).
+- Leave it in AV mode a few minutes per scenario, then End supervision.
+- Check data\TRAFFIC_<date>_<time>\scenarios.csv: column "collisions"
+  should be 0. events.csv "collision" rows say what was hit and the AV's
+  speed (speed 0 = probably another car hit us).
+- More traffic: raise the numbers in the scene's "traffic" line.
+
+
+--------------------------------------------------------------------------
+9. GIT NOTES
+--------------------------------------------------------------------------
+Problem: "git pull" -> "Your local changes to the following files would
+  be overwritten by merge: autosim/settings.py ... Aborting".
+Cause: I had edited settings.py myself (THEME = "blue") and the update
+  also changed that file. Git will not overwrite my edit.
+Fix: blue became the default on GitHub (#16), so I discarded my edit:
+  git restore autosim/settings.py
+  git pull
+  If I want to KEEP a local edit instead:
+  git stash
+  git pull
+  git stash pop
+Check afterwards: "git status" -> "nothing to commit, working tree clean".
+
+
+--------------------------------------------------------------------------
+TODO / NEXT TIME
+--------------------------------------------------------------------------
+[ ] Run the heavy-traffic test in CARLA after #18: no more stops for cross
+    traffic that is not there; "collisions" = 0.
+[ ] Check in CARLA: construction "Yes - closed" takes a clear detour or
+    asks to turn around manually (no crash).
+[ ] Check in CARLA: with a vehicle stuck ahead the AV asks after 30 s; if
+    background cars get stuck at the construction site, keep traffic away
+    from scene obstacles.
+[ ] Check that scenario questions never come up inside an intersection.
+[ ] Try link settings, e.g. 0.5 / 0.3 / 10 (E-STOP visible ~0.8 s later).
+[ ] Optional: longer routes so the progress numbers are bigger.
+[ ] Optional: oncoming check for left turns on green; 4-way stop order.
+[ ] Fix README: Python 3.7-3.10 note, use "python -m pip".
+[ ] Improve the "NOT CONNECTED TO CARLA" message to show the real reason.
 [ ] Fix any more bugs and errors.
 ==========================================================================
