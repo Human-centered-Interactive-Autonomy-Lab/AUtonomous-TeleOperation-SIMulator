@@ -48,23 +48,20 @@ MANUAL_KEYS: Dict[str, Tuple[int, ...]] = {
 }
 
 
-FEET_PER_MILE = 5280
+def _so_far_of_total(done: float, total: float, decimals: int) -> Tuple[float, float]:
+    """Both rounded the same way, never showing more done than the total."""
+    total = round(max(0.0, total), decimals)
+    return min(round(max(0.0, done), decimals), total), total
 
 
-def time_left_text(minutes: float) -> str:
-    """Remaining trip time in plain words: 'About 3 min left', 'Under 1 min left', 'Arriving'."""
-    if minutes < 0.25:
-        return "Arriving"
-    if minutes < 1.0:
-        return "Under 1 min left"
-    return "About {:.0f} min left".format(minutes)
+def minutes_text(done: float, total: float) -> str:
+    """'2 of 13 min': minutes so far of the estimated total."""
+    return "{:.0f} of {:.0f} min".format(*_so_far_of_total(done, total, 0))
 
 
-def distance_left_text(miles: float) -> str:
-    """Remaining distance: feet (to the nearest 50) below 0.2 mi, else miles."""
-    if miles < 0.2:
-        return "{:.0f} ft to go".format(round(max(0.0, miles) * FEET_PER_MILE / 50.0) * 50)
-    return "{:.1f} mi to go".format(miles)
+def miles_text(done: float, total: float) -> str:
+    """'0.7 of 5.4 mi': miles driven of the trip's length."""
+    return "{:.1f} of {:.1f} mi".format(*_so_far_of_total(done, total, 1))
 
 
 class Hotspot:
@@ -468,10 +465,9 @@ class OperatorInterface:
         if fill.width > 0:
             pygame.draw.rect(self.screen, C["progress_fill"], fill, border_radius=bar.height // 2)
         y = bar.bottom + 6
-        # What is left, in plain words (the bar and percentage show how far along it is).
-        self._blit_text(time_left_text(minutes_total - minutes_done), "normal", C["text"],
+        self._blit_text(minutes_text(minutes_done, minutes_total), "normal", C["text"],
                         (bar.right, y), anchor="topright")
-        self._blit_text(distance_left_text(total - traveled), "normal", C["text"],
+        self._blit_text(miles_text(traveled, total), "normal", C["text"],
                         (bar.right, y + self.fonts["normal"].get_height() + 2), anchor="topright")
         self._blit_text("{:.0f}%".format(fraction * 100), "normal", C["text"], (bar.x, y))
 

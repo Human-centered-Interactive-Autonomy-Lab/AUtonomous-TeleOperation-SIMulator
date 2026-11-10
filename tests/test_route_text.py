@@ -1,19 +1,16 @@
-"""Plain-words remaining time and distance in the Route panel."""
+"""Route panel text: "2 of 13 min" and "0.7 of 5.4 mi"."""
 
-from autosim.interface import distance_left_text, time_left_text
-
-
-def test_time_left():
-    assert time_left_text(5.4) == "About 5 min left"
-    assert time_left_text(1.6) == "About 2 min left"
-    assert time_left_text(0.5) == "Under 1 min left"
-    assert time_left_text(0.1) == "Arriving"
-    assert time_left_text(-1.0) == "Arriving"
+from autosim.interface import miles_text, minutes_text
 
 
-def test_distance_left():
-    assert distance_left_text(0.16) == "850 ft to go"         # 845 ft, to the nearest 50
-    assert distance_left_text(0.05) == "250 ft to go"
-    assert distance_left_text(0.0) == "0 ft to go"
-    assert distance_left_text(0.24) == "0.2 mi to go"
-    assert distance_left_text(1.26) == "1.3 mi to go"
+def test_minutes():
+    assert minutes_text(2.2, 12.8) == "2 of 13 min"
+    assert minutes_text(0.2, 1.1) == "0 of 1 min"
+    assert minutes_text(1.6, 1.4) == "1 of 1 min"       # never more done than the total
+
+
+def test_miles():
+    assert miles_text(0.71, 5.38) == "0.7 of 5.4 mi"
+    assert miles_text(0.249, 0.249) == "0.2 of 0.2 mi"  # trip complete: both the same
+    assert miles_text(0.26, 0.24) == "0.2 of 0.2 mi"
+    assert miles_text(-0.01, 0.25) == "0.0 of 0.2 mi"
