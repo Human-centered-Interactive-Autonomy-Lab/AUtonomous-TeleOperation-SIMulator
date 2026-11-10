@@ -166,6 +166,7 @@ class CarlaSimulation(Simulation):
         self._junctions: List[Dict[str, Any]] = []         # intersections along the current route
         self._junctions_route: Optional[_Route] = None      # the route they were found for
         self._junction_asked: Optional[Dict[str, Any]] = None   # blocked intersection the operator was asked about
+        self._blocked_since: Optional[float] = None         # held by a vehicle / pedestrian since (AV mode)
         self._BasicAgent = self._GlobalRoutePlanner = self._RoadOption = None
 
     # =====================================================================
@@ -371,11 +372,50 @@ class CarlaSimulation(Simulation):
                 return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
             self._yielding = walker_in_path
         if self._yielding:
+            self._note_blocked("pedestrian")
             return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
         held = self._traffic_rules()
         if held is not None:
+            self._blocked_since = None
             return held
-        return self.agent.run_step()
+        control = self.agent.run_step()
+        self._note_blocked(self._agent_hazard(control))
+        return control
+
+    def _agent_hazard(self, control) -> str:
+        """Why CARLA's BasicAgent is braking for a hazard: "red light", "vehicle ahead" or ""."""
+        if control.throttle > 0.0 or control.brake <= 0.0 or self.state.speed_mph > 3.0:
+            return ""
+        agent, speed = self.agent, self.state.speed_mps
+        try:
+            if agent._affected_by_traffic_light(agent._lights_list,
+                                                agent._base_tlight_threshold + agent._speed_ratio * speed)[0]:
+                return "red light"
+            if agent._vehicle_obstacle_detected(self.world.get_actors().filter("*vehicle*"),
+                                                agent._base_vehicle_threshold + agent._speed_ratio * speed)[0]:
+                return "vehicle ahead"
+        except (AttributeError, TypeError, RuntimeError):
+            pass                       # a different agents version: just no explanation
+        return ""
+
+    def _note_blocked(self, reason: str) -> None:
+        """Show why the AV is standing still; if a vehicle or pedestrian keeps it there
+        for AV_BLOCKED_ASK_SECONDS, stop and ask the operator (red lights just wait)."""
+        if reason:
+            self.state.waiting_for = reason
+        stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
+        if reason not in ("vehicle ahead", "pedestrian") or not stopped:
+            self._blocked_since = None
+            return
+        now = time.monotonic()
+        if self._blocked_since is None:
+            self._blocked_since = now
+        elif now - self._blocked_since >= settings.AV_BLOCKED_ASK_SECONDS:
+            self._blocked_since = None
+            print("[carla] Blocked by a {} for {:.0f} s; asking the operator.".format(
+                "stopped vehicle" if reason == "vehicle ahead" else "pedestrian", settings.AV_BLOCKED_ASK_SECONDS))
+            self.soft_stop("Blocked by a {} ahead for {:.0f} s".format(
+                "stopped vehicle" if reason == "vehicle ahead" else "pedestrian", settings.AV_BLOCKED_ASK_SECONDS))
 
     # --- traffic rules (AV mode) ----------------------------------------------
 
@@ -547,6 +587,7 @@ class CarlaSimulation(Simulation):
         # Interrupted while pulling over at the route end: plan that pull-over again from here.
         self.route_finishing = False
         self.curb_after_m = None
+        self._blocked_since = None
         if self._junction_asked is not None:    # the operator checked the blocked intersection: cross it
             self._junction_asked["cleared"] = True
             self._junction_asked = None

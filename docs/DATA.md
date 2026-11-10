@@ -42,7 +42,8 @@ getting out at the end of a trip), `route_complete`, `driving_to_pickup`
 `task_error`, `scenario_end`, plus anything task scripts log.
 
 Traffic rules in AV mode log `av_waiting` when a rule holds the car and
-`av_waiting_end` when it lets go; `reason` is `stop sign` or `cross traffic`.
+`av_waiting_end` when it lets go; `reason` is `stop sign`, `cross traffic`,
+`red light`, `vehicle ahead` or `pedestrian`.
 
 ## scenarios.csv
 
