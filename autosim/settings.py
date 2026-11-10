@@ -267,7 +267,12 @@ PASSENGER_WALK_SPEED_MPS: float = 1.3
 PASSENGER_WALK_AWAY_METERS: float = 15.0
 PASSENGER_MAX_SIDEWALK_DISTANCE_METERS: float = 6.0   # farther than this: walk straight out instead
 PASSENGER_DOOR_OPEN_SECONDS: float = 3.0              # cars without opening doors skip this
-PASSENGER_DROPOFF_TIMEOUT_SECONDS: float = 30.0       # remove a passenger who gets stuck
+PASSENGER_DROPOFF_TIMEOUT_SECONDS: float = 20.0       # remove the passenger after this, wherever they are
+
+# A scripted pedestrian (passenger, scene or task walker) that has not moved
+# for this long is blocked: the passenger skips ahead on their path, others
+# stop where they are instead of walking into the obstacle forever.
+WALKER_STUCK_SECONDS: float = 2.0
 
 # Time budget for a commanded lane change (seconds driving in the old lane
 # first, then the maneuver).
@@ -279,6 +284,7 @@ STOPPED_SPEED_MPH: float = 0.5
 
 # Spawn a pedestrian beside the car when the route is completed.
 SPAWN_PEDESTRIAN_AT_ROUTE_END: bool = True
+ROUTE_END_CUSTOMER_RIGHT_OF_CAR_METERS: float = 3.0   # from the car's centre, toward the sidewalk
 
 # Alert shown while the passenger gets out at the end of the route.
 PASSENGER_DROPOFF_ALERT_TEXT: str = "Passenger is getting out"
