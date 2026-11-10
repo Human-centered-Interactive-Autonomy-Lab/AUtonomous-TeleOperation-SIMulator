@@ -43,7 +43,7 @@ getting out at the end of a trip), `route_complete`, `driving_to_pickup`
 
 Traffic rules in AV mode log `av_waiting` when a rule holds the car and
 `av_waiting_end` when it lets go; `reason` is `stop sign`, `cross traffic`,
-`red light`, `vehicle ahead` or `pedestrian`.
+`red light`, `traffic` (queued behind a waiting car), `vehicle ahead` or `pedestrian`.
 
 ## scenarios.csv
 

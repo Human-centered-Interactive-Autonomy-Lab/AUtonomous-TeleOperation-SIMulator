@@ -398,12 +398,39 @@ class CarlaSimulation(Simulation):
             pass                       # a different agents version: just no explanation
         return ""
 
+    def _in_queue(self) -> bool:
+        """Is the vehicle ahead of us itself waiting (at a red light, or behind another car)?"""
+        try:
+            found, ahead, _ = self.agent._vehicle_obstacle_detected(
+                self.world.get_actors().filter("*vehicle*"), self.agent._base_vehicle_threshold)
+        except (AttributeError, TypeError, RuntimeError):
+            return False
+        if not found or ahead is None:
+            return False
+        try:
+            if ahead.is_at_traffic_light() and ahead.get_traffic_light_state() != carla.TrafficLightState.Green:
+                return True
+        except (AttributeError, RuntimeError):
+            pass
+        spot, heading = ahead.get_location(), ahead.get_transform().get_forward_vector()
+        for other in self.world.get_actors().filter("*vehicle*"):
+            if other.id in (ahead.id, self.ego.id):
+                continue
+            offset = other.get_location() - spot
+            along = offset.x * heading.x + offset.y * heading.y
+            if 0.0 < along < 10.0 and abs(offset.x * heading.y - offset.y * heading.x) < 2.0:
+                return True                         # something right in front of it too
+        return False
+
     def _note_blocked(self, reason: str) -> None:
         """Show why the AV is standing still; if a vehicle or pedestrian keeps it there
         for AV_BLOCKED_ASK_SECONDS, stop and ask the operator (red lights just wait)."""
         if reason:
             self.state.waiting_for = reason
         stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
+        if reason == "vehicle ahead" and self._in_queue():
+            self.state.waiting_for = "traffic"     # queued behind a held car: just wait
+            reason = "traffic"
         if reason not in ("vehicle ahead", "pedestrian") or not stopped:
             self._blocked_since = None
             return
@@ -456,7 +483,9 @@ class CarlaSimulation(Simulation):
                                     sum(w.transform.location.y for w in inside) / len(inside),
                                     inside[0].transform.location.z)
             radius = max(8.0, 0.5 * before.transform.location.distance(after.transform.location))
+            junction_id = None
             try:
+                junction_id = inside[0].get_junction().id
                 box = inside[0].get_junction().bounding_box
                 radius = max(box.extent.x, box.extent.y) + 1.0
                 if box.location.distance(center) < radius:
@@ -477,6 +506,7 @@ class CarlaSimulation(Simulation):
                         break
             exit_m = route.cumulative[index] if index < len(waypoints) else route.end_distance
             junctions.append({"entry_m": entry_m, "exit_m": exit_m, "center": center, "radius": radius,
+                              "id": junction_id,
                               "turn": _yaw_change(before, after), "signalized": signalized, "stop_m": stop_m,
                               "stopped_at": None, "stop_done": False, "cleared": False, "waiting_since": None})
         self._junctions, self._junctions_route = junctions, route
@@ -518,7 +548,7 @@ class CarlaSimulation(Simulation):
                     (not stop_sign or junction["stop_done"]):
                 to_entry = junction["entry_m"] - front
                 speed = self.state.speed_mps
-                if to_entry <= 3.0 + speed * speed / 6.0:      # can still stop before it at ~3 m/s2
+                if to_entry <= max(12.0, 3.0 + speed * speed / 6.0):   # early enough to stop gently at the line
                     other = self._cross_traffic(junction)
                     if other is None:
                         junction["waiting_since"] = None
@@ -532,12 +562,22 @@ class CarlaSimulation(Simulation):
                         elif now - junction["waiting_since"] > settings.YIELD_MAX_WAIT_SECONDS:
                             self._junction_asked = junction
                             self.soft_stop("Intersection blocked by {}".format(_describe(other)))
-                        return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+                        if to_entry > 3.0:        # not at the line yet: roll up to it, then hold
+                            desired_kmh = min(desired_kmh, max(3.0, math.sqrt(
+                                2.0 * settings.STOP_SIGN_DECELERATION_MPS2 * (to_entry - 2.5)) * 3.6))
+                        else:
+                            return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
         self.agent.set_target_speed(desired_kmh)
         return None
 
     def _cross_traffic(self, junction: Dict[str, Any]) -> Optional[Any]:
-        """A vehicle the AV must give way to at this intersection, or None."""
+        """A vehicle the AV must give way to at this intersection, or None.
+
+        Uses the road network: a vehicle counts if it is inside this very
+        intersection (moving, or standing on or next to our path), or if its lane
+        runs into this intersection and it will be there within YIELD_GAP_SECONDS.
+        Parked cars, cars waiting at their own line, and cars on roads that do not
+        lead in do not count."""
         ego = self.ego.get_transform()
         forward = ego.get_forward_vector()
         center, radius = junction["center"], junction["radius"]
@@ -558,6 +598,10 @@ class CarlaSimulation(Simulation):
                 continue   # going our way (ahead of us): BasicAgent keeps its distance
             if speed > 0.5 and along < -0.7 * speed and not turning_left:
                 continue   # oncoming: only in our way when we turn left across its lane
+            if junction.get("id") is not None:
+                if self._conflicts_in_junction(vehicle, location, speed, junction):
+                    return vehicle
+                continue
             if to_center <= radius:
                 return vehicle             # in the intersection
             if speed < 1.0:
@@ -566,6 +610,30 @@ class CarlaSimulation(Simulation):
             if closing > 0.5 * speed and (to_center - radius) / closing < settings.YIELD_GAP_SECONDS:
                 return vehicle             # arriving before we could be across
         return None
+
+    def _conflicts_in_junction(self, vehicle, location, speed: float, junction: Dict[str, Any]) -> bool:
+        """Road-network test for ``_cross_traffic`` (see there)."""
+        lane = self.map.get_waypoint(location)
+        if lane is None:
+            return False
+        if lane.is_junction and lane.get_junction().id == junction["id"]:
+            if speed > 0.5:
+                return True                # crossing right now
+            # Standing in the intersection: only in the way if on or next to our path through it.
+            path_m, lateral, _ = self.route.project(location.x, location.y)
+            return junction["entry_m"] - 2.0 <= path_m <= junction["exit_m"] + 2.0 and abs(lateral) < 3.5
+        if speed < 1.0:
+            return False                   # waiting at its own stop line / light, or parked
+        velocity, along = vehicle.get_velocity(), lane.transform.get_forward_vector()
+        if velocity.x * along.x + velocity.y * along.y < 0.5 * speed:
+            return False                   # not driving along that lane (matched to the lane beside it)
+        reach = min(settings.YIELD_WATCH_METERS, speed * settings.YIELD_GAP_SECONDS)
+        distance = 2.0
+        while distance <= reach:           # does its lane run into this intersection that soon?
+            if any(ahead.is_junction and ahead.get_junction().id == junction["id"] for ahead in lane.next(distance)):
+                return True
+            distance += 2.0
+        return False
 
     # =====================================================================
     # Commands
