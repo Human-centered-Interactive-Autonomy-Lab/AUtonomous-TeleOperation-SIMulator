@@ -298,16 +298,27 @@ LANE_CHANGE_DURATION_SECONDS: float = 2.0
 # Speed below which the vehicle is considered stopped.
 STOPPED_SPEED_MPH: float = 0.5
 
-# Spawn a pedestrian beside the car when the route is completed.
-SPAWN_PEDESTRIAN_AT_ROUTE_END: bool = True
-ROUTE_END_CUSTOMER_RIGHT_OF_CAR_METERS: float = 3.0   # from the car's centre, toward the sidewalk
+# After a drop-off the AV picks up the next passenger: it waits a moment,
+# drives on for a random distance, pulls over where a pedestrian is waiting
+# beside the road, the passenger gets in, and it drives them to their
+# destination, where they are dropped off and the cycle repeats.  This does
+# not happen when "Return to depot after this job" is on.
+PICK_UP_NEXT_PASSENGER: bool = True
+NEXT_PICKUP_DELAY_SECONDS: float = 5.0          # parked after the drop-off before driving on
+NEXT_PICKUP_MIN_METERS: float = 150.0           # drive this far (random between min and max)
+NEXT_PICKUP_MAX_METERS: float = 300.0           #   before reaching the waiting passenger
+NEXT_TRIP_LENGTH_METERS: float = 400.0          # pickup to drop-off
+PASSENGER_BOARDING_TIMEOUT_SECONDS: float = 15.0   # passenger is in the car after this at the latest
 
-# Alert shown while the passenger gets out at the end of the route.
+# Alerts shown while a passenger gets out / in.
 PASSENGER_DROPOFF_ALERT_TEXT: str = "Passenger is getting out"
+PASSENGER_PICKUP_ALERT_TEXT: str = "Passenger is getting in"
 
-# Text shown in the Route panel after the route is completed.
-ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT: str = "Route complete. Waiting for next customer."
+# Text shown in the Route panel after the route is completed, and on the way
+# to the next pickup.
+ROUTE_COMPLETE_NEXT_CUSTOMER_TEXT: str = "Route complete. Picking up next passenger."
 ROUTE_COMPLETE_DEPOT_TEXT: str = "Route complete. Returning to depot."
+ROUTE_TO_PICKUP_TEXT: str = "Driving to pick up the next passenger."
 
 
 # =============================================================================

@@ -35,7 +35,10 @@ delayed command actually reached the vehicle), `decision_shown`,
 `task_triggered`, `speech`, `talk_start`/`talk_end`, `collision`,
 `manual_control_refused`, `map_zoom`, `status_changed`,
 `passenger_dropoff_started`/`passenger_dropoff_complete` (the passenger
-getting out at the end of the route), `route_complete`,
+getting out at the end of a trip), `route_complete`, `driving_to_pickup`
+(the AV drives on to the next passenger), `passenger_pickup_started`/
+`passenger_picked_up` (the next passenger getting in); these carry a
+`trip` number (1 = the scenario's own route),
 `task_error`, `scenario_end`, plus anything task scripts log.
 
 Traffic rules in AV mode log `av_waiting` when a rule holds the car and
@@ -56,6 +59,7 @@ Traffic rules in AV mode log `av_waiting` when a rule holds the car and
 | `decisions_total`, `decisions_unanswered`|                                                       |
 | `commands_total`, `emergency_stops`, `pull_overs`, `manual_control_s` |                          |
 | `collisions`, `route_complete`, `final_mode`, `ended_by` |                                         |
+| `trips_completed`, `passengers_picked_up` | passengers dropped off / picked up during the scenario |
 | `video_delay`, `input_delay`             | the link settings used                                |
 | `correct_responses`, `incorrect_responses` | copied from the scenario file                       |
 | `shown_<status>`                         | every status value the participant saw                |

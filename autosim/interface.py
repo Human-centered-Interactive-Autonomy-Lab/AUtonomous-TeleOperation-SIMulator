@@ -434,8 +434,9 @@ class OperatorInterface:
 
     def _draw_route(self, rect: Rect, session: ScenarioSession) -> None:
         content = self._panel(rect, settings.PANEL_TITLES.get("route"))
-        if session.route_complete:
-            for index, line in enumerate(self._wrap(session.route_complete_text(), "title", content.width)):
+        message = session.route_message()
+        if message:
+            for index, line in enumerate(self._wrap(message, "title", content.width)):
                 self._blit_text(line, "title", C["text"],
                                 (content.centerx, content.y + 8 + index * self.fonts["title"].get_height()), anchor="midtop")
             return

@@ -19,7 +19,7 @@ The full column reference is in docs/SCENARIOS.md.  In short:
   lights             Street lights: auto / off / low / high.
   target_speed_mph   Cruising speed of the automated vehicle.
   start_stopped      yes = the car is standing still when the scenario starts.
-  route_end          customer / depot -- what happens when the route completes.
+  route_end          customer / depot -- after the drop-off: pick up the next passenger, or stay parked.
   alerts             Alerts shown at start, separated by "|".  Prefix with
                      "critical:", "warning:" or "info:" to set the severity.
   hidden_buttons     Action buttons to hide, separated by "|" (e.g. honk|talk_externally).
