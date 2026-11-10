@@ -18,8 +18,8 @@ Groups (where the button is drawn):
     "map"           tool buttons on the Map panel
     "status"        button at the bottom of the Status panel
 
-Styles: "normal", "danger" (red), "estop" (red oval), "primary" (orange),
-        "link" (text-like).
+Styles: "normal", "danger" (red), "estop" (emergency stop: red, ringed),
+        "primary" (orange), "link" (a row in the command list).
 Kinds:  "click" (default), "toggle" (shows on/off), "hold" (handler runs
         on press, ``release`` handler on release; not used by default).
 """

@@ -46,6 +46,11 @@ buttons), `end`, `map` or `status`. A handler can return the name of a dialog
 to open one. To hide a button in a single scenario, put its id in that
 scenario's `hidden_buttons` column.
 
+In the command list every entry is a button; one with `kind="toggle"` (and an
+`is_on` function) shows an on/off switch, like Hazard lights. Colors, the font
+family (`FONT_FAMILIES`) and the corner rounding (`CORNER_RADIUS`) are in the
+interface section of `settings.py`.
+
 ## Camera mounts: `settings.CAMERA_MOUNTS`
 
 Position (metres, relative to the car's centre) and field of view of each
