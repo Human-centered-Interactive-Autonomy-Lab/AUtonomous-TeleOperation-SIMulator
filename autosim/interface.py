@@ -48,10 +48,23 @@ MANUAL_KEYS: Dict[str, Tuple[int, ...]] = {
 }
 
 
-def _clock(minutes: float) -> str:
-    """1.75 -> '1:45'."""
-    seconds = int(round(max(0.0, minutes) * 60))
-    return "{}:{:02d}".format(seconds // 60, seconds % 60)
+FEET_PER_MILE = 5280
+
+
+def time_left_text(minutes: float) -> str:
+    """Remaining trip time in plain words: 'About 3 min left', 'Under 1 min left', 'Arriving'."""
+    if minutes < 0.25:
+        return "Arriving"
+    if minutes < 1.0:
+        return "Under 1 min left"
+    return "About {:.0f} min left".format(minutes)
+
+
+def distance_left_text(miles: float) -> str:
+    """Remaining distance: feet (to the nearest 50) below 0.2 mi, else miles."""
+    if miles < 0.2:
+        return "{:.0f} ft to go".format(round(max(0.0, miles) * FEET_PER_MILE / 50.0) * 50)
+    return "{:.1f} mi to go".format(miles)
 
 
 class Hotspot:
@@ -455,9 +468,10 @@ class OperatorInterface:
         if fill.width > 0:
             pygame.draw.rect(self.screen, C["progress_fill"], fill, border_radius=bar.height // 2)
         y = bar.bottom + 6
-        self._blit_text("{} of {} min".format(_clock(minutes_done), _clock(minutes_total)), "normal", C["text"],
+        # What is left, in plain words (the bar and percentage show how far along it is).
+        self._blit_text(time_left_text(minutes_total - minutes_done), "normal", C["text"],
                         (bar.right, y), anchor="topright")
-        self._blit_text("{:.2f} of {:.2f} mi".format(traveled, total), "normal", C["text"],
+        self._blit_text(distance_left_text(total - traveled), "normal", C["text"],
                         (bar.right, y + self.fonts["normal"].get_height() + 2), anchor="topright")
         self._blit_text("{:.0f}%".format(fraction * 100), "normal", C["text"], (bar.x, y))
 
