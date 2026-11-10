@@ -1,0 +1,4 @@
+scenario_id,group,description,scene,time_of_day,weather
+heavy_traffic_day,traffic_test,Heavy traffic in daylight; watch for collisions,heavy_traffic.json,day,clear
+heavy_traffic_rain,traffic_test,Heavy traffic in rain,heavy_traffic.json,day,rain
+heavy_traffic_night,traffic_test,Heavy traffic at night,heavy_traffic.json,night,clear

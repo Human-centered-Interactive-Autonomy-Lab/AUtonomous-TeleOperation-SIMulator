@@ -80,6 +80,29 @@ Each scenario ends when the operator presses **End supervision**. Close the
 window (or press Shift+Esc) to stop early. Data is saved either way, in
 `data/<participant>_<date>_<time>/`.
 
+### Testing in heavy traffic
+
+`scenarios/heavy_traffic_battery.csv` drives an 800 m route (then keeps picking
+up passengers) through 60 background cars and 40 pedestrians, in daylight,
+rain and at night (scene: `scenarios/scenes/heavy_traffic.json`):
+
+```bash
+python -m autosim --scenarios scenarios/heavy_traffic_battery.csv --participant TRAFFIC --wait-time 0
+```
+
+Leave the car in AV mode for a few minutes per scenario, then press End
+supervision. Every collision shows a "Collision detected" alert, and is
+recorded in the session folder `data/TRAFFIC_<date>_<time>/`:
+
+* `scenarios.csv`, column `collisions`: the count per scenario (0 = none).
+* `events.csv`, rows with event `collision`: when, where, and what was hit
+  (`details` -> `other`), plus the AV's mode and speed at that moment. A
+  collision while the AV is stopped (speed 0) usually means another car ran
+  into it.
+
+For even more traffic, raise the numbers in the scene's `"traffic"` line
+(Town10 has about 150 spawn points for cars).
+
 ## Writing your own experiment
 
 | You want to...                               | Read                                           |

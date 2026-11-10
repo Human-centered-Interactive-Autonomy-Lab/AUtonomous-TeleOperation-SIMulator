@@ -1,0 +1,7 @@
+{
+  "description": "Busy city drive with no obstacles, for checking that the AV keeps clear of other traffic.",
+  "map": "Town10HD_Opt",
+  "ego": {"spawn_point": 1, "blueprint": "vehicle.tesla.model3"},
+  "route": {"length_m": 800},
+  "traffic": {"vehicles": 60, "walkers": 40}
+}
