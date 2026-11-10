@@ -147,6 +147,7 @@ class CarlaSimulation(Simulation):
         self.scene_actor_ids: set = set()           # props/vehicles placed by the scene or tasks
         self.actor_names: Dict[int, str] = {}       # actor id -> name from the scene file
         self.walker_targets: Dict[int, Tuple[Any, float]] = {}   # walker id -> (target location, speed)
+        self.walker_progress: Dict[int, Tuple[Any, float]] = {}  # walker id -> (where it last moved, when)
         self.cameras: Dict[str, Any] = {}
         self._frames: Dict[str, Tuple[float, Any]] = {}
         self._frame_lock = threading.Lock()
@@ -198,6 +199,7 @@ class CarlaSimulation(Simulation):
         self._collisions = []
         self.ignored_obstacles = set()
         self.walker_targets = {}
+        self.walker_progress = {}
         self.scene_actor_ids = set()
         self.actor_names = {}
         self._yielding = False
@@ -756,8 +758,26 @@ class CarlaSimulation(Simulation):
             if target is None:
                 continue
             location, speed = target
-            if _walk_towards(actor, location, speed):
-                del self.walker_targets[actor.id]
+            if self._walker_stuck(actor):
+                actor.apply_control(carla.WalkerControl(carla.Vector3D(0, 0, 0), 0.0))
+                print("[carla] Pedestrian '{}' is blocked; it stops there.".format(
+                    self.actor_names.get(actor.id) or actor.type_id))
+            elif not _walk_towards(actor, location, speed):
+                continue
+            del self.walker_targets[actor.id]
+            self.walker_progress.pop(actor.id, None)
+
+    def _walker_stuck(self, walker) -> bool:
+        """True once a scripted walker has not moved for WALKER_STUCK_SECONDS."""
+        now, here = time.monotonic(), walker.get_location()
+        last = self.walker_progress.get(walker.id)
+        if last is None or here.distance(last[0]) > 0.3:
+            self.walker_progress[walker.id] = (here, now)
+            return False
+        if now - last[1] < settings.WALKER_STUCK_SECONDS:
+            return False
+        self.walker_progress[walker.id] = (here, now)   # count again from here
+        return True
 
     # --- passenger drop-off at the route end ----------------------------------
 
@@ -819,15 +839,25 @@ class CarlaSimulation(Simulation):
         if dropoff["door_open"] and elapsed >= settings.PASSENGER_DOOR_OPEN_SECONDS:
             self._set_passenger_door(False)
             dropoff["door_open"] = False
+        if path and self._walker_stuck(walker):
+            if dropoff.get("skipped"):   # blocked again: end the walk here
+                del path[:]
+            else:                        # blocked: head for the next point instead
+                path.pop(0)
+                dropoff["skipped"] = True
+                print("[carla] Passenger blocked; walking on to the next point.")
         if path and _walk_towards(walker, path[0], settings.PASSENGER_WALK_SPEED_MPS):
             path.pop(0)
+            dropoff["skipped"] = False
         if path and elapsed < settings.PASSENGER_DROPOFF_TIMEOUT_SECONDS:
             return
         if dropoff["door_open"]:
             self._set_passenger_door(False)
         self.dropoff = None
+        self.walker_progress.pop(walker.id, None)
         self.destroy_actor(walker)
-        print("[carla] Passenger dropped off.")
+        print("[carla] Passenger dropped off{}.".format(
+            " (time limit reached before the end of the walk)" if path else ""))
         if self.mode == DrivingMode.DROPPING_OFF:
             self.mode = DrivingMode.ROUTE_COMPLETE
 

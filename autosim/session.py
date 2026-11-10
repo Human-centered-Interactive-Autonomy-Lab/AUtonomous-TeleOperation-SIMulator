@@ -13,6 +13,7 @@ simulation, runs the task logic, and logs every event.
          +------ draws state -----+    +---- hooks ---- tasks (TaskScript)
 """
 
+import math
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -444,12 +445,21 @@ class ScenarioSession:
         self.route_complete = True
         self.log("route_complete", return_to_depot=self.return_to_depot)
         if settings.SPAWN_PEDESTRIAN_AT_ROUTE_END and not self.return_to_depot:
-            traveled = self.vehicle_state.route_traveled_m
+            state = self.vehicle_state
+            # Relative to where the car actually stopped (at the curb, possibly
+            # lanes to the right of the route), not to the route's own lane.
+            yaw = math.radians(state.yaw_degrees)
+            forward, right = (math.cos(yaw), math.sin(yaw)), (-math.sin(yaw), math.cos(yaw))
+
+            def beside_car(ahead_m: float, right_m: float) -> Placement:
+                return Placement({"x": state.x + forward[0] * ahead_m + right[0] * right_m,
+                                  "y": state.y + forward[1] * ahead_m + right[1] * right_m,
+                                  "z": state.z, "yaw": state.yaw_degrees + 180.0})
             try:
                 # A customer walks up along the sidewalk on the right.
                 self.route_complete_walker = self.simulation.spawn_walker(
-                    Placement({"route_m": traveled + 8, "lateral_m": 6.5}),
-                    Placement({"route_m": traveled + 1, "lateral_m": 5.6}),
+                    beside_car(8.0, settings.ROUTE_END_CUSTOMER_RIGHT_OF_CAR_METERS),
+                    beside_car(1.5, settings.ROUTE_END_CUSTOMER_RIGHT_OF_CAR_METERS),
                     speed_mps=1.0,
                 )
             except Exception as error:   # optional nicety; never fatal
