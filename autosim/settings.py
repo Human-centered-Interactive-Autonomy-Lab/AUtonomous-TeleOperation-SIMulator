@@ -344,6 +344,11 @@ PASSENGER_DROPOFF_TIMEOUT_SECONDS: float = 20.0       # remove the passenger aft
 # stop where they are instead of walking into the obstacle forever.
 WALKER_STUCK_SECONDS: float = 2.0
 
+# A passenger getting out or in who gets no closer to where they are going for
+# this long (a curb, a pole, the open door) first jumps, then steps up onto
+# the point, instead of walking against it.
+WALKER_NO_PROGRESS_SECONDS: float = 1.5
+
 # Time budget for a commanded lane change (seconds driving in the old lane
 # first, then the maneuver).
 LANE_CHANGE_SAME_LANE_SECONDS: float = 0.5

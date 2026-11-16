@@ -1399,6 +1399,32 @@ class CarlaSimulation(Simulation):
             del self.walker_targets[actor.id]
             self.walker_progress.pop(actor.id, None)
 
+    def _walk_step(self, walker, target, speed: float, progress: Dict[str, Any]) -> bool:
+        """Walk ``walker`` toward ``target``; True once there.  Getting no closer for
+        WALKER_NO_PROGRESS_SECONDS (a curb, a pole, the car's door): first a jump, then
+        a step straight up onto the target point, as a person would."""
+        now, here = time.monotonic(), walker.get_location()
+        distance = math.hypot(target.x - here.x, target.y - here.y)
+        if distance < 0.3:
+            walker.apply_control(carla.WalkerControl(carla.Vector3D(0, 0, 0), 0.0))
+            return True
+        if distance < progress.get("best", float("inf")) - 0.2:
+            progress.update(best=distance, since=now)
+        elif now - progress.setdefault("since", now) > settings.WALKER_NO_PROGRESS_SECONDS:
+            if not progress.get("jumped"):
+                progress.update(jumped=True, since=now)
+                walker.apply_control(carla.WalkerControl(
+                    carla.Vector3D((target.x - here.x) / distance, (target.y - here.y) / distance, 0.0), speed, True))
+                return False
+            walker.set_location(carla.Location(target.x, target.y, target.z + SPAWN_HEIGHT["walker"]))
+            walker.apply_control(carla.WalkerControl(carla.Vector3D(0, 0, 0), 0.0))
+            progress["stepped"] = True
+            print("[carla] Pedestrian stepped up onto the curb / past the obstacle.")
+            return True
+        walker.apply_control(carla.WalkerControl(
+            carla.Vector3D((target.x - here.x) / distance, (target.y - here.y) / distance, 0.0), speed))
+        return False
+
     def _walker_stuck(self, walker) -> bool:
         """True once a scripted walker has not moved for WALKER_STUCK_SECONDS."""
         now, here = time.monotonic(), walker.get_location()
@@ -1488,16 +1514,16 @@ class CarlaSimulation(Simulation):
         if dropoff["door_open"] and elapsed >= settings.PASSENGER_DOOR_OPEN_SECONDS:
             self._set_passenger_door(False)
             dropoff["door_open"] = False
-        if path and self._walker_stuck(walker):
-            if dropoff.get("skipped"):   # blocked again: end the walk here
-                del path[:]
-            else:                        # blocked: head for the next point instead
-                path.pop(0)
-                dropoff["skipped"] = True
-                print("[carla] Passenger blocked; walking on to the next point.")
-        if path and _walk_towards(walker, path[0], settings.PASSENGER_WALK_SPEED_MPS):
+        if path and self._walk_step(walker, path[0], settings.PASSENGER_WALK_SPEED_MPS,
+                                    dropoff.setdefault("progress", {})):
             path.pop(0)
-            dropoff["skipped"] = False
+            # One step-up is a curb; needing another one straight after means the
+            # passenger cannot walk here at all: end the walk.
+            stepped = dropoff["progress"].get("stepped", False)
+            if stepped and dropoff.get("stepped_last"):
+                del path[:]
+            dropoff["stepped_last"] = stepped
+            dropoff["progress"] = {}
         if path and elapsed < settings.PASSENGER_DROPOFF_TIMEOUT_SECONDS:
             return
         if dropoff["door_open"]:
@@ -1568,8 +1594,8 @@ class CarlaSimulation(Simulation):
         if pickup is None or not pickup["boarding"]:
             return
         walker = pickup["walker"]
-        arrived = self._walker_stuck(walker) or \
-            _walk_towards(walker, pickup["target"], settings.PASSENGER_WALK_SPEED_MPS)
+        arrived = self._walk_step(walker, pickup["target"], settings.PASSENGER_WALK_SPEED_MPS,
+                                  pickup.setdefault("progress", {}))
         if not arrived and time.monotonic() - pickup["started"] < pickup.get("timeout", settings.PASSENGER_BOARDING_TIMEOUT_SECONDS):
             return
         self.pickup = None
