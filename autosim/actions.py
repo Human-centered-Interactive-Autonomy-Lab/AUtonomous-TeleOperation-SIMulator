@@ -79,7 +79,7 @@ def _emergency_stop(session) -> None:
 
 def _pull_over(session) -> None:
     session.record_action("pull_over")
-    session.manual_control_active = False
+    session.release_manual_control()
     session.send_vehicle_command("pull_over", session.simulation.pull_over)
     session.feedback("Pulling over when safe.")
 

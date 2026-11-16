@@ -331,6 +331,7 @@ EMERGENCY_STOP_BRAKE: float = 1.0
 # first (normal rules) and stops this far past it.
 PULL_OVER_SPEED_MPH: float = 6.0
 PULL_OVER_DISTANCE_METERS: float = 18.0
+PULL_OVER_MIN_DISTANCE_METERS: float = 6.0     # shortest pull-over (obstacle close ahead)
 PULL_OVER_EDGE_MARGIN_METERS: float = 0.4    # gap kept to the lane edge
 
 # End of the route: start pulling over this far before the end (but only

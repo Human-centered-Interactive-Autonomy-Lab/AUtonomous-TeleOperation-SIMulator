@@ -154,6 +154,7 @@ class CarlaSimulation(Simulation):
         self._curb_pending = False                  # pulling over: not yet in the curb lane
         self._hazard_vehicle: Optional[Any] = None   # the vehicle BasicAgent is braking for
         self._next_curb_check = 0.0
+        self._resume_when_clear: Optional[bool] = None   # Resume AV asked while a passenger was at the car
         self.ignored_obstacles: set = set()
         self.spawned: List[Any] = []                # everything we must destroy
         self.scene_actor_ids: set = set()           # props/vehicles placed by the scene or tasks
@@ -311,6 +312,8 @@ class CarlaSimulation(Simulation):
         self._update_dropoff()
         self._update_pickup()
         self._manage_traffic()
+        if self._resume_when_clear is not None and not self._passenger_at_car():
+            self.resume_autonomy(self._resume_when_clear)   # Resume AV pressed while the passenger was there
         control = self._control_for_mode()
         self.ego.apply_control(control)
         return self.state
@@ -369,9 +372,20 @@ class CarlaSimulation(Simulation):
                     held = self._traffic_rules()
                     if held is not None:
                         return held
-            # Moving toward the curb: still wait for pedestrians crossing in front.
+            # Moving toward the curb: still stop for an obstacle and wait for pedestrians.
             if self._tick_count % OBSTACLE_CHECK_EVERY_TICKS == 0:
-                self._yielding = self._scan_path()[1]
+                blocking, self._yielding = self._scan_path()
+                if blocking is not None:       # only if we would reach it before our stop point
+                    spot = blocking.get_location()
+                    box = getattr(blocking, "bounding_box", None)
+                    reach_m = self.route.project(spot.x, spot.y, near_index=self.route_index)[0] - \
+                        self.ego.bounding_box.extent.x - (box.extent.x if box is not None else 0.5) - 1.0
+                    if reach_m > self.pull_over_end_m:
+                        blocking = None
+                if blocking is not None:
+                    self.soft_stop("Obstacle detected ahead: {}".format(
+                        self.actor_names.get(blocking.id) or _describe(blocking)))
+                    return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
             if self._yielding:
                 return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
             return self.agent.run_step()
@@ -689,6 +703,16 @@ class CarlaSimulation(Simulation):
     def resume_autonomy(self, obstacles_checked: bool = True) -> None:
         if self.ego is None:
             return
+        if self.mode == DrivingMode.MANUAL:
+            # The operator is driving (the Resume AV button ends manual control first):
+            # an automatic resume -- a task, an answer -- must not take the wheel.
+            print("[carla] Resume ignored: the operator is driving manually.")
+            return
+        if self._passenger_at_car():
+            self._resume_when_clear = obstacles_checked
+            print("[carla] Waiting for the passenger to be clear of the car before driving off.")
+            return
+        self._resume_when_clear = None
         # Obstacles the AV is waiting at are now "checked by the operator" -- not after a
         # detour, where the operator said the way ahead is closed.
         if obstacles_checked:
@@ -702,6 +726,9 @@ class CarlaSimulation(Simulation):
         # Interrupted while pulling over at the route end: plan that pull-over again from here.
         self.route_finishing = False
         self.curb_after_m = None
+        self._curb_pending = False            # a pull-over in progress is cancelled ...
+        if self._overtaking is None:
+            self.lane_target = 0              # ... and the car merges back into the route's lane when safe
         self._blocked_since = None
         if self._junction_asked is not None:    # the operator checked the blocked intersection: cross it
             self._junction_asked["cleared"] = True
@@ -719,6 +746,14 @@ class CarlaSimulation(Simulation):
     def pull_over(self) -> None:
         if self.ego is None:
             return
+        if self.mode == DrivingMode.MANUAL:
+            print("[carla] Pull over ignored: the operator is driving manually.")
+            return
+        if self.mode in (DrivingMode.PULLING_OVER, DrivingMode.PULLED_OVER, DrivingMode.DROPPING_OFF,
+                         DrivingMode.PICKING_UP, DrivingMode.ROUTE_COMPLETE):
+            return                                  # already pulling over / at the curb: nothing to do
+        if self.mode != DrivingMode.AUTONOMOUS:
+            self._replan_from_here()                # e.g. after an E-STOP: continue from where the car is
         traveled, half_length = self.state.route_traveled_m, self.ego.bounding_box.extent.x
         self.pull_over_end_m = traveled + settings.PULL_OVER_DISTANCE_METERS
         self.curb_after_m = None
@@ -731,6 +766,13 @@ class CarlaSimulation(Simulation):
                 break                                     # beyond where we will stop
             self.curb_after_m = junction["exit_m"] + half_length
             self.pull_over_end_m = junction["exit_m"] + settings.PULL_OVER_DISTANCE_METERS
+        # Never into something: stop before the first obstacle or standing car in the
+        # stretch (our lane, the curb lane and the curb), if there is room for that.
+        obstacle = self._pull_over_obstacle(self.pull_over_end_m + 10.0)
+        if obstacle is not None and obstacle[0] < self.pull_over_end_m:
+            stop_m, actor = obstacle
+            self.pull_over_end_m = max(traveled + settings.PULL_OVER_MIN_DISTANCE_METERS, stop_m)
+            print("[carla] Pulling over before the {} ahead.".format(self.actor_names.get(actor.id) or _describe(actor)))
         if self.curb_after_m is None:
             self._steer_to_curb()
         else:
@@ -779,6 +821,45 @@ class CarlaSimulation(Simulation):
             self.state.route_length_m = self.route.end_distance
             self._shift_plan(self.lane_offset)
 
+    def _pull_over_obstacle(self, reach: float, lane_only: bool = False) -> Optional[Tuple[float, Any]]:
+        """(route_m to stop at, actor) for the first placed obstacle or standing car ahead,
+        within ``reach``, between our lane and the curb (``lane_only``: in our lane); None if none."""
+        if self.route is None:
+            return None
+        ego = self.ego.get_location()
+        ego_m, ego_lateral, _ = self.route.project(ego.x, ego.y, near_index=self.route_index)
+        waypoint = self.route.waypoints[min(self.route_index, len(self.route.waypoints) - 1)]
+        _, lanes_to_right = _rightmost_lane(waypoint)
+        right_band = 1.6 if lane_only else (lanes_to_right - self.lane_offset + 1) * waypoint.lane_width + 1.0
+        half = self.ego.bounding_box.extent.x
+        candidates = [a for a in self.spawned if a.id in self.scene_actor_ids and not a.type_id.startswith("walker.")]
+        for vehicle in self.world.get_actors().filter("vehicle.*"):
+            velocity = vehicle.get_velocity()
+            if vehicle.id != self.ego.id and math.hypot(velocity.x, velocity.y) < 1.0 and vehicle not in candidates:
+                candidates.append(vehicle)
+        best = None
+        for actor in candidates:
+            location = actor.get_location()
+            if location.distance(ego) > reach + 15.0:
+                continue
+            actor_m, lateral, _ = self.route.project(location.x, location.y, near_index=self.route_index, window=60)
+            ahead = actor_m - ego_m
+            if not 2.0 < ahead < reach or not -1.6 < lateral - ego_lateral < right_band:
+                continue
+            box = getattr(actor, "bounding_box", None)
+            stop_m = actor_m - half - (box.extent.x if box is not None else 0.5) - settings.CURB_SPOT_MARGIN_METERS - 1.0
+            if best is None or stop_m < best[0]:
+                best = (stop_m, actor)
+        return best
+
+    def _passenger_at_car(self) -> bool:
+        """Is a passenger getting out (still beside the car / door open) or getting in?"""
+        dropoff = self.dropoff
+        if dropoff is not None and (dropoff["door_open"] or
+                                    dropoff["walker"].get_location().distance(self.ego.get_location()) < 3.5):
+            return True
+        return self.pickup is not None and self.pickup.get("boarding", False)
+
     def _check_curb_spot(self) -> None:
         """Pulling over: if the stop spot at the curb is taken (parked car, obstacle, person),
         pull forward to the next free spot instead of stopping into it."""
@@ -793,13 +874,26 @@ class CarlaSimulation(Simulation):
             return
         old = self.pull_over_end_m
         candidate = old
+        obstacle = self._pull_over_obstacle(old - self.state.route_traveled_m + settings.CURB_SPOT_SEARCH_METERS,
+                                            lane_only=True)    # parked cars at the curb are simply passed
+        limit = obstacle[0] if obstacle is not None and obstacle[0] > old else float("inf")
+        found = False
         for _ in range(int(settings.CURB_SPOT_SEARCH_METERS / ROUTE_STEP_METERS)):
             candidate += ROUTE_STEP_METERS
+            if candidate > limit:
+                break                                # never past something standing in the way
             self._extend_route_to(candidate + 10.0)
             if self._curb_spot_free(candidate):
+                found = True
                 break
-        print("[carla] Curb spot taken; pulling forward {:.0f} m to a free one.".format(candidate - old))
-        self.pull_over_end_m = candidate
+        if found:
+            print("[carla] Curb spot taken; pulling forward {:.0f} m to a free one.".format(candidate - old))
+            self.pull_over_end_m = candidate
+        elif obstacle is not None and candidate > limit:
+            print("[carla] No free curb spot before the obstacle ahead; stopping and asking the operator.")
+            self.soft_stop("No free spot to pull over ahead")
+        else:
+            self.pull_over_end_m = candidate          # look again from there
 
     def _curb_spot_free(self, route_m: float) -> bool:
         """Is there room to stop at the curb here: no car, obstacle or person in the way,
@@ -808,10 +902,12 @@ class CarlaSimulation(Simulation):
         for junction in self._route_junctions():
             if junction["entry_m"] - 3.0 < route_m + half and junction["exit_m"] + 3.0 > route_m - half:
                 return False
-        waypoint = self.route.waypoints[self.route.index_at(route_m)]
+        index = self.route.index_at(route_m)
+        waypoint = self.route.waypoints[index]
         lane = _lanes_over(waypoint, self.lane_offset, driving_only=True) or waypoint
-        center, forward, right = lane.transform.location, lane.transform.get_forward_vector(), \
-            lane.transform.get_right_vector()
+        forward, right = lane.transform.get_forward_vector(), lane.transform.get_right_vector()
+        shift = route_m - self.route.cumulative[index]            # exactly at route_m, not the nearest point
+        center = lane.transform.location + carla.Location(forward.x * shift, forward.y * shift, 0.0)
         edge = lane.lane_width / 2.0 + 0.5
         beside = lane.get_right_lane()
         if beside is not None and beside.lane_type in (carla.LaneType.Shoulder, carla.LaneType.Parking):
@@ -862,7 +958,7 @@ class CarlaSimulation(Simulation):
         self.agent.set_target_speed(min(self.target_speed_mph, settings.PULL_OVER_SPEED_MPH) * MPH_TO_KMH)
 
     def change_lane(self, direction: str) -> bool:
-        if self.ego is None:
+        if self.ego is None or self.mode == DrivingMode.MANUAL:
             return False
         here = self.map.get_waypoint(self.ego.get_location())
         target = here.get_left_lane() if direction == "left" else here.get_right_lane()
@@ -958,6 +1054,8 @@ class CarlaSimulation(Simulation):
         if enabled:
             self.mode = DrivingMode.MANUAL
             self.manual_input = (0.0, 0.0, settings.MANUAL_COAST_BRAKE, False)
+            self._curb_pending = False
+            self._resume_when_clear = None
         elif self.mode == DrivingMode.MANUAL:
             self.mode = DrivingMode.HOLDING
             self._replan_from_here()
