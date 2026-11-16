@@ -149,12 +149,15 @@ class CarlaSimulation(Simulation):
         self.lane_return_at_m: Optional[float] = None
         self.lane_offset = 0                        # lanes right of the route's lane the plan follows (- = left)
         self.lane_target = 0                        # lane the car wants; changed one lane at a time, when safe
-        self._overtaking: Optional[int] = None      # id of the stopped vehicle being passed
+        self._overtaking: Optional[int] = None      # id of the stopped vehicle / obstacle being passed
+        self._keep_lane_until_m: Optional[float] = None  # an operator's lane change: stay in it until here
         self._stuck_behind_since: Optional[float] = None
         self._curb_pending = False                  # pulling over: not yet in the curb lane
         self._hazard_vehicle: Optional[Any] = None   # the vehicle BasicAgent is braking for
         self._next_curb_check = 0.0
         self._resume_when_clear: Optional[bool] = None   # Resume AV asked while a passenger was at the car
+        self._blinker: Optional[str] = None          # turn signal now on: "left", "right" or None
+        self._lane_changed: Tuple[float, str] = (0.0, "")   # when and to which side the last lane change was
         self.ignored_obstacles: set = set()
         self.spawned: List[Any] = []                # everything we must destroy
         self.scene_actor_ids: set = set()           # props/vehicles placed by the scene or tasks
@@ -316,6 +319,7 @@ class CarlaSimulation(Simulation):
             self.resume_autonomy(self._resume_when_clear)   # Resume AV pressed while the passenger was there
         control = self._control_for_mode()
         self.ego.apply_control(control)
+        self._update_turn_signal()
         return self.state
 
     def camera_frames(self) -> Dict[str, Tuple[float, Any]]:
@@ -561,14 +565,15 @@ class CarlaSimulation(Simulation):
             junctions.append({"entry_m": entry_m, "exit_m": exit_m, "center": center, "radius": radius,
                               "id": junction_id,
                               "turn": _yaw_change(before, after), "signalized": signalized, "stop_m": stop_m,
-                              "stopped_at": None, "stop_done": False, "cleared": False, "waiting_since": None})
+                              "stopped_at": None, "stop_done": False, "cleared": False, "waiting_since": None,
+                              "arrived_at": None, "arrivals": {}})
         extended = self._junctions_extended_from is not None and self._junctions_extended_from is self._junctions_route
         previous = {round(j["entry_m"], 1): j for j in self._junctions} if extended else {}
         self._junctions_extended_from = None
         for junction in junctions:          # same intersection after the route was extended: keep its state
             old = previous.get(round(junction["entry_m"], 1))
             if old is not None:
-                for key in ("stopped_at", "stop_done", "cleared", "waiting_since"):
+                for key in ("stopped_at", "stop_done", "cleared", "waiting_since", "arrived_at", "arrivals"):
                     junction[key] = old[key]
         self._junctions, self._junctions_route = junctions, route
         return junctions
@@ -589,6 +594,8 @@ class CarlaSimulation(Simulation):
             now = time.monotonic()
             stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
             desired_kmh = min(desired_kmh, settings.INTERSECTION_APPROACH_SPEED_MPH * MPH_TO_KMH)
+            if settings.YIELD_AT_INTERSECTIONS:
+                self._track_arrivals(junction, now)     # from the start, so earlier arrivals keep their turn
             stop_sign = settings.OBEY_STOP_SIGNS and junction["stop_m"] is not None
             if stop_sign and not junction["stop_done"]:
                 to_line = junction["stop_m"] - front
@@ -607,31 +614,183 @@ class CarlaSimulation(Simulation):
                     junction["stop_done"] = True
             if settings.YIELD_AT_INTERSECTIONS and not junction["cleared"] and \
                     (not stop_sign or junction["stop_done"]):
-                to_entry = junction["entry_m"] - front
-                speed = self.state.speed_mps
-                if to_entry <= max(12.0, 3.0 + speed * speed / 6.0):   # early enough to stop gently at the line
-                    other = self._cross_traffic(junction)
-                    if other is None:
-                        junction["waiting_since"] = None
-                        if stopped or to_entry <= 3.5:
-                            junction["cleared"] = True          # committed: no second-guessing mid-crossing
+                held = self._right_of_way(junction, front, now, stopped)
+                if held is not None:
+                    if isinstance(held, float):
+                        desired_kmh = min(desired_kmh, held)       # rolling up to the line
                     else:
-                        self.state.waiting_for = "cross traffic"
-                        if junction["waiting_since"] is None:
-                            junction["waiting_since"] = now
-                            print("[carla] Yielding to {} at an intersection.".format(_describe(other)))
-                        elif now - junction["waiting_since"] > settings.YIELD_MAX_WAIT_SECONDS:
-                            self._junction_asked = junction
-                            self.soft_stop("Intersection blocked by {}".format(_describe(other)))
-                        if to_entry > 3.0:        # not at the line yet: roll up to it, then hold
-                            desired_kmh = min(desired_kmh, max(3.0, math.sqrt(
-                                2.0 * settings.STOP_SIGN_DECELERATION_MPS2 * (to_entry - 2.5)) * 3.6))
-                        else:
-                            return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+                        return held
+        elif junction is not None and settings.YIELD_AT_INTERSECTIONS and not junction["cleared"]:
+            now = time.monotonic()
+            held = self._right_of_way(junction, front, now, self.state.speed_mph < settings.STOPPED_SPEED_MPH)
+            if held is not None:
+                if isinstance(held, float):
+                    desired_kmh = min(desired_kmh, held)
+                else:
+                    return held
         self.agent.set_target_speed(desired_kmh)
         return None
 
-    def _cross_traffic(self, junction: Dict[str, Any]) -> Optional[Any]:
+    def _right_of_way(self, junction: Dict[str, Any], front: float, now: float, stopped: bool):
+        """Who may enter the intersection: None = we may (go on); a float = a speed
+        limit in km/h (rolling up to the line while giving way); a control = hold.
+
+        * Cross traffic in or arriving at the intersection goes first.
+        * All-way / multi-way stops: whoever stopped first goes first; at the same
+          time, the car on the right goes first.  Cars standing at their own line
+          are watched: one starting to move off is given way to.
+        * With traffic lights (green): give way to vehicles still in the intersection
+          and, turning left, to oncoming traffic.
+        * Never enter unless there is room behind the intersection (do not block it).
+        * The decision is final only once the car has entered the intersection."""
+        to_entry = junction["entry_m"] - front
+        speed = self.state.speed_mps
+        if to_entry > max(12.0, 3.0 + speed * speed / 6.0):     # early enough to stop gently at the line
+            return None
+        if stopped and to_entry <= 3.5 and junction.get("arrived_at") is None:
+            junction["arrived_at"] = junction.get("stopped_at") or now     # when we reached our line
+        reason, other = "cross traffic", None
+        if junction["signalized"]:
+            if self._light_is_green():
+                other = self._cross_traffic(junction, signalized=True)
+        else:
+            self._track_arrivals(junction, now)
+            other = self._cross_traffic(junction) or self._has_priority_over_us(junction)
+        if other is None and to_entry <= 3.5:
+            other = self._exit_blocker(junction)
+            reason = "space after intersection"
+        if other is None:
+            junction["waiting_since"] = None
+            if to_entry <= 0.3:
+                junction["cleared"] = True         # in the intersection: no second-guessing mid-crossing
+            return None
+        self.state.waiting_for = reason
+        if reason == "cross traffic":
+            if junction["waiting_since"] is None:
+                junction["waiting_since"] = now
+                print("[carla] Yielding to {} at an intersection.".format(_describe(other)))
+            elif now - junction["waiting_since"] > settings.YIELD_MAX_WAIT_SECONDS:
+                self._junction_asked = junction
+                self.soft_stop("Intersection blocked by {}".format(_describe(other)))
+        if to_entry > 3.0:                             # not at the line yet: roll up to it, then hold
+            return max(3.0, math.sqrt(2.0 * settings.STOP_SIGN_DECELERATION_MPS2 * (to_entry - 2.5)) * 3.6)
+        return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+
+    def _update_turn_signal(self) -> None:
+        """Signal like a driver must: right while pulling over, the side of a lane
+        change (before and while changing), and the turn's side before a turning
+        intersection.  Hazard lights, when on, take precedence."""
+        if self.ego is None or self.state.hazard_lights_on:
+            return
+        wanted = None
+        if self.mode == DrivingMode.PULLING_OVER:
+            wanted = "right"
+        elif self.mode == DrivingMode.AUTONOMOUS and self.route is not None:
+            changed_at, changed_to = self._lane_changed
+            if self.lane_target != self.lane_offset:
+                wanted = "right" if self.lane_target > self.lane_offset else "left"
+            elif time.monotonic() - changed_at < 3.0:
+                wanted = changed_to
+            else:
+                front = self.state.route_traveled_m + self.ego.bounding_box.extent.x
+                for junction in self._route_junctions():
+                    if junction["entry_m"] - 30.0 <= front <= junction["exit_m"] and abs(junction["turn"]) > 30.0:
+                        wanted = "right" if junction["turn"] > 0 else "left"
+                        break
+        if wanted == self._blinker:
+            return
+        self._blinker = wanted
+        try:
+            both = int(carla.VehicleLightState.LeftBlinker) | int(carla.VehicleLightState.RightBlinker)
+            lights = int(self.ego.get_light_state()) & ~both
+            if wanted is not None:
+                lights |= int(carla.VehicleLightState.LeftBlinker if wanted == "left"
+                              else carla.VehicleLightState.RightBlinker)
+            self.ego.set_light_state(carla.VehicleLightState(lights))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    def _light_is_green(self) -> bool:
+        """Our traffic light (once at it) is green."""
+        try:
+            return self.ego.is_at_traffic_light() and \
+                self.ego.get_traffic_light_state() == carla.TrafficLightState.Green
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _waiting_at_line(self, vehicle, junction: Dict[str, Any]) -> bool:
+        """Is this vehicle standing in a lane that runs into this intersection, at its line
+        (not parked at the side, not in our own lane in front of us)?"""
+        lane = self.map.get_waypoint(vehicle.get_location())
+        if lane is None or lane.is_junction or junction.get("id") is None:
+            return False
+        location, center = vehicle.get_location(), lane.transform.location
+        right = lane.transform.get_right_vector()
+        if abs((location.x - center.x) * right.x + (location.y - center.y) * right.y) > 1.3:
+            return False                                   # at the side of the road: parked
+        heading = lane.transform.get_forward_vector()
+        ours = self.ego.get_transform().get_forward_vector()
+        if heading.x * ours.x + heading.y * ours.y > 0.85:
+            return False                                   # our own direction: queue ahead / behind us
+        return any(ahead.is_junction and ahead.get_junction().id == junction["id"]
+                   for distance in (2.0, 4.0, 6.0, 8.0, 10.0) for ahead in lane.next(distance))
+
+    def _track_arrivals(self, junction: Dict[str, Any], now: float) -> None:
+        """Remember when each other car came to a stop at its line (for arrival order)."""
+        arrivals = junction.setdefault("arrivals", {})
+        center, radius = junction["center"], junction["radius"]
+        waiting = set()
+        for vehicle in self.world.get_actors().filter("vehicle.*"):
+            if vehicle.id == self.ego.id or vehicle.id in self.scene_actor_ids:
+                continue
+            location = vehicle.get_location()
+            if math.hypot(center.x - location.x, center.y - location.y) > radius + 15.0:
+                continue
+            velocity = vehicle.get_velocity()
+            if math.hypot(velocity.x, velocity.y) > 0.5 or not self._waiting_at_line(vehicle, junction):
+                continue
+            waiting.add(vehicle.id)
+            arrivals.setdefault(vehicle.id, now)
+        for vehicle_id in list(arrivals):
+            if vehicle_id not in waiting:
+                del arrivals[vehicle_id]                   # it has gone (or moved off: then it is cross traffic)
+
+    def _has_priority_over_us(self, junction: Dict[str, Any]) -> Optional[Any]:
+        """At a stop: a car that stopped at its line before us, or at the same time on our right."""
+        ours = junction.get("arrived_at")
+        if ours is None:
+            return None                                    # we are not stopped at the line
+        ego = self.ego.get_transform()
+        right = ego.get_right_vector()
+        for vehicle_id, arrived in junction.get("arrivals", {}).items():
+            vehicle = self.world.get_actor(vehicle_id)
+            if vehicle is None:
+                continue
+            if arrived < ours - 0.5:
+                return vehicle                             # it was there first
+            offset = vehicle.get_location() - ego.location
+            if abs(arrived - ours) <= 1.0 and offset.x * right.x + offset.y * right.y > 0:
+                return vehicle                             # same time, on our right
+        return None
+
+    def _exit_blocker(self, junction: Dict[str, Any]) -> Optional[Any]:
+        """A standing vehicle just behind the intersection in our lane, leaving no room for us."""
+        half = self.ego.bounding_box.extent.x
+        lane_width = self.route.waypoints[min(self.route_index, len(self.route.waypoints) - 1)].lane_width
+        for vehicle in self.world.get_actors().filter("vehicle.*"):
+            if vehicle.id == self.ego.id:
+                continue
+            velocity = vehicle.get_velocity()
+            if math.hypot(velocity.x, velocity.y) > 1.0:
+                continue
+            location = vehicle.get_location()
+            route_m, lateral, _ = self.route.project(location.x, location.y, near_index=self.route_index, window=60)
+            if junction["exit_m"] - 1.0 <= route_m <= junction["exit_m"] + 2 * half + 3.0 and \
+                    abs(lateral - self.lane_offset * lane_width) < 1.6:
+                return vehicle
+        return None
+
+    def _cross_traffic(self, junction: Dict[str, Any], signalized: bool = False) -> Optional[Any]:
         """A vehicle the AV must give way to at this intersection, or None.
 
         Uses the road network: a vehicle counts if it is inside this very
@@ -657,12 +816,16 @@ class CarlaSimulation(Simulation):
             along = velocity.x * forward.x + velocity.y * forward.y
             if speed > 0.5 and along > 0.7 * speed:
                 continue   # going our way (ahead of us): BasicAgent keeps its distance
-            if speed > 0.5 and along < -0.7 * speed and not turning_left:
+            oncoming = speed > 0.5 and along < -0.7 * speed
+            if oncoming and not turning_left:
                 continue   # oncoming: only in our way when we turn left across its lane
             if junction.get("id") is not None:
-                if self._conflicts_in_junction(vehicle, location, speed, junction):
+                if self._conflicts_in_junction(vehicle, location, speed, junction,
+                                               arriving_counts=not signalized or oncoming):
                     return vehicle
                 continue
+            if signalized and not oncoming and to_center > radius:
+                continue   # cross traffic has a red light
             if to_center <= radius:
                 return vehicle             # in the intersection
             if speed < 1.0:
@@ -672,7 +835,8 @@ class CarlaSimulation(Simulation):
                 return vehicle             # arriving before we could be across
         return None
 
-    def _conflicts_in_junction(self, vehicle, location, speed: float, junction: Dict[str, Any]) -> bool:
+    def _conflicts_in_junction(self, vehicle, location, speed: float, junction: Dict[str, Any],
+                               arriving_counts: bool = True) -> bool:
         """Road-network test for ``_cross_traffic`` (see there)."""
         lane = self.map.get_waypoint(location)
         if lane is None:
@@ -683,12 +847,13 @@ class CarlaSimulation(Simulation):
             # Standing in the intersection: only in the way if on or next to our path through it.
             path_m, lateral, _ = self.route.project(location.x, location.y)
             return junction["entry_m"] - 2.0 <= path_m <= junction["exit_m"] + 2.0 and abs(lateral) < 3.5
-        if speed < 1.0:
-            return False                   # waiting at its own stop line / light, or parked
+        if speed < 0.3 or not arriving_counts:
+            return False                   # standing (at its line / light, or parked): see arrival order
         velocity, along = vehicle.get_velocity(), lane.transform.get_forward_vector()
         if velocity.x * along.x + velocity.y * along.y < 0.5 * speed:
             return False                   # not driving along that lane (matched to the lane beside it)
-        reach = min(settings.YIELD_WATCH_METERS, speed * settings.YIELD_GAP_SECONDS)
+        # Also a car just moving off from its line (slow, but right at the entry).
+        reach = max(8.0, min(settings.YIELD_WATCH_METERS, speed * settings.YIELD_GAP_SECONDS))
         distance = 2.0
         while distance <= reach:           # does its lane run into this intersection that soon?
             if any(ahead.is_junction and ahead.get_junction().id == junction["id"] for ahead in lane.next(distance)):
@@ -727,7 +892,7 @@ class CarlaSimulation(Simulation):
         self.route_finishing = False
         self.curb_after_m = None
         self._curb_pending = False            # a pull-over in progress is cancelled ...
-        if self._overtaking is None:
+        if self._overtaking is None and self._keep_lane_until_m is None:
             self.lane_target = 0              # ... and the car merges back into the route's lane when safe
         self._blocked_since = None
         if self._junction_asked is not None:    # the operator checked the blocked intersection: cross it
@@ -966,9 +1131,15 @@ class CarlaSimulation(Simulation):
             return False
         opposite = (target.lane_id > 0) != (here.lane_id > 0)
         self.lane_target = self.lane_offset + (-1 if direction == "left" else 1)   # made when it is safe
+        # Stay in the new lane until past what the operator is going around (or for a while).
+        obstacle = self._pull_over_obstacle(60.0, lane_only=True)
+        if obstacle is not None:
+            self._overtaking = obstacle[1].id
+        else:
+            self._keep_lane_until_m = self.state.route_traveled_m + OPPOSITE_LANE_RETURN_AFTER_METERS
+            if opposite:   # do not stay on the wrong side of the road
+                self.lane_return_at_m = self.state.route_traveled_m + OPPOSITE_LANE_RETURN_AFTER_METERS
         self._update_lane()
-        if opposite:   # do not stay on the wrong side of the road
-            self.lane_return_at_m = self.state.route_traveled_m + OPPOSITE_LANE_RETURN_AFTER_METERS
         return True
 
     def reroute(self, alternate_index: int) -> bool:
@@ -1065,6 +1236,7 @@ class CarlaSimulation(Simulation):
 
     def set_hazard_lights(self, on: bool) -> None:
         self.state.hazard_lights_on = on
+        self._blinker = None                  # hazards own the blinkers; turn signals re-applied after
         if self.ego is None:
             return
         state = self.ego.get_light_state()
@@ -1262,6 +1434,7 @@ class CarlaSimulation(Simulation):
         """Plan along the route in the route's own lane (a new or changed route)."""
         self.lane_offset = self.lane_target = 0
         self._overtaking = None
+        self._keep_lane_until_m = None
         self._set_agent_plan(self.route.waypoints[self.route_index:] or self.route.waypoints)
 
     def _shift_plan(self, lanes: int) -> None:
@@ -1301,7 +1474,9 @@ class CarlaSimulation(Simulation):
         step = self.lane_offset + (1 if self.lane_target > self.lane_offset else -1)
         blocker = self._lane_change_blocker(step)
         if blocker is None:
-            print("[carla] Lane change {}.".format("right" if step > self.lane_offset else "left"))
+            side = "right" if step > self.lane_offset else "left"
+            print("[carla] Lane change {}.".format(side))
+            self._lane_changed = (time.monotonic(), side)
             self._shift_plan(step)
 
     def _lane_change_blocker(self, lanes: int) -> Optional[Any]:
@@ -1367,8 +1542,11 @@ class CarlaSimulation(Simulation):
                     actor_m = self.route.project(location.x, location.y, near_index=max(0, self.route_index - 15),
                                                  window=90)[0]
                     passed = actor_m < self.state.route_traveled_m - 2 * self.ego.bounding_box.extent.x - 6.0
+            if self._keep_lane_until_m is not None and self.state.route_traveled_m < self._keep_lane_until_m:
+                passed = False                        # the operator's lane change: not yet
             if passed or self._turn_ahead_needs_route_lane():
                 self._overtaking = None
+                self._keep_lane_until_m = None
                 self.lane_target = 0                  # keep right except to pass
         if hazard_vehicle is None or not stopped or not settings.OVERTAKE_STOPPED_VEHICLES:
             self._stuck_behind_since = None
