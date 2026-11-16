@@ -160,6 +160,13 @@ class CarlaSimulation(Simulation):
         self.actor_names: Dict[int, str] = {}       # actor id -> name from the scene file
         self.walker_targets: Dict[int, Tuple[Any, float]] = {}   # walker id -> (target location, speed)
         self.walker_progress: Dict[int, Tuple[Any, float]] = {}  # walker id -> (where it last moved, when)
+        self._traffic_manager = None
+        self._npc_cars: List[Any] = []              # background cars (Traffic Manager autopilot)
+        self._npc_walkers: List[Tuple[Any, Any]] = []   # background pedestrians: (walker, its AI controller)
+        self._npc_watch: Dict[int, Dict[str, Any]] = {}  # actor id -> where/when it last moved, nudges tried
+        self._wanted_cars = 0
+        self._wanted_walkers = 0
+        self._next_traffic_check = 0.0
         self.cameras: Dict[str, Any] = {}
         self._frames: Dict[str, Tuple[float, Any]] = {}
         self._frame_lock = threading.Lock()
@@ -220,6 +227,7 @@ class CarlaSimulation(Simulation):
         self.ignored_obstacles = set()
         self.walker_targets = {}
         self.walker_progress = {}
+        self._npc_cars, self._npc_walkers, self._npc_watch = [], [], {}
         self.scene_actor_ids = set()
         self.actor_names = {}
         self._yielding = False
@@ -278,6 +286,7 @@ class CarlaSimulation(Simulation):
             commands = [carla.command.DestroyActor(actor) for actor in reversed(self.spawned)]
             self.client.apply_batch_sync(commands, False)
         self.spawned = []
+        self._npc_cars, self._npc_walkers, self._npc_watch = [], [], {}
         self.dropoff = None
         self.pickup = None
         self.ego = None
@@ -301,6 +310,7 @@ class CarlaSimulation(Simulation):
         self._move_walkers()
         self._update_dropoff()
         self._update_pickup()
+        self._manage_traffic()
         control = self._control_for_mode()
         self.ego.apply_control(control)
         return self.state
@@ -1623,23 +1633,57 @@ class CarlaSimulation(Simulation):
 
     def _spawn_traffic(self, vehicles: int, walkers: int) -> None:
         """Background traffic driven by CARLA's Traffic Manager and walker AI."""
+        self._wanted_cars, self._wanted_walkers = max(0, vehicles), max(0, walkers)
         if vehicles <= 0 and walkers <= 0:
             return
-        library = self.world.get_blueprint_library()
         traffic_manager = self.client.get_trafficmanager()
+        self._traffic_manager = traffic_manager
         traffic_manager.set_synchronous_mode(False)
-        ego_location = self.ego.get_location()
-        spawn_points = [p for p in self.map.get_spawn_points() if p.location.distance(ego_location) > 15.0]
-        random.shuffle(spawn_points)
-        car_blueprints = [b for b in library.filter("vehicle.*")
-                          if b.has_attribute("number_of_wheels") and b.get_attribute("number_of_wheels").as_int() == 4]
-        for point in spawn_points[:vehicles]:
-            actor = self.world.try_spawn_actor(random.choice(car_blueprints), point)
-            if actor is not None:
-                actor.set_autopilot(True, traffic_manager.get_port())
-                self.spawned.append(actor)
-        controller_blueprint = library.find("controller.ai.walker")
-        for _ in range(walkers):
+        for setting, value in (("set_global_distance_to_leading_vehicle", settings.NPC_FOLLOW_DISTANCE_METERS),
+                               ("global_percentage_speed_difference", settings.NPC_SPEED_BELOW_LIMIT_PERCENT),
+                               ("set_respawn_dormant_vehicles", False)):      # never remove cars far away
+            try:
+                getattr(traffic_manager, setting)(value)
+            except (AttributeError, RuntimeError):
+                pass
+        cars = sum(self._spawn_npc_car(away_from_ego=15.0) for _ in range(vehicles))
+        people = sum(self._spawn_npc_walker() for _ in range(walkers))
+        print("[carla] Background traffic: {} of {} cars, {} of {} pedestrians.".format(cars, vehicles, people, walkers))
+
+    def _npc_spawn_points(self, away_from_ego: float) -> List[Any]:
+        """Free spawn points at least ``away_from_ego`` from the AV and 25 m from the scene's obstacles."""
+        ego = self.ego.get_location()
+        avoid = [a.get_location() for a in self.spawned if a.id in self.scene_actor_ids]
+        taken = [car.get_location() for car in self._npc_cars]
+        points = [p for p in self.map.get_spawn_points()
+                  if p.location.distance(ego) > away_from_ego
+                  and all(p.location.distance(spot) > 25.0 for spot in avoid)
+                  and all(p.location.distance(spot) > 8.0 for spot in taken)]
+        random.shuffle(points)
+        return points
+
+    def _spawn_npc_car(self, away_from_ego: float) -> bool:
+        library = self.world.get_blueprint_library()
+        blueprints = [b for b in library.filter("vehicle.*")
+                      if b.has_attribute("number_of_wheels") and b.get_attribute("number_of_wheels").as_int() == 4]
+        for point in self._npc_spawn_points(away_from_ego)[:10]:     # keep trying until one is free
+            car = self.world.try_spawn_actor(random.choice(blueprints), point)
+            if car is None:
+                continue
+            car.set_autopilot(True, self._traffic_manager.get_port())
+            for setting, value in (("auto_lane_change", True), ("update_vehicle_lights", True)):
+                try:
+                    getattr(self._traffic_manager, setting)(car, value)    # pass stopped cars; lights at night
+                except (AttributeError, RuntimeError):
+                    pass
+            self.spawned.append(car)
+            self._npc_cars.append(car)
+            return True
+        return False
+
+    def _spawn_npc_walker(self) -> bool:
+        library = self.world.get_blueprint_library()
+        for _ in range(5):
             location = self.world.get_random_location_from_navigation()
             if location is None:
                 continue
@@ -1647,12 +1691,100 @@ class CarlaSimulation(Simulation):
                                                 carla.Transform(location + carla.Location(z=1.0)))
             if walker is None:
                 continue
-            self.spawned.append(walker)
-            controller = self.world.spawn_actor(controller_blueprint, carla.Transform(), walker)
-            self.spawned.append(controller)
+            controller = self.world.spawn_actor(library.find("controller.ai.walker"), carla.Transform(), walker)
+            self.spawned += [walker, controller]
             controller.start()
             controller.go_to_location(self.world.get_random_location_from_navigation())
-            controller.set_max_speed(1.2)
+            controller.set_max_speed(1.0 + random.random() * 0.6)
+            self._npc_walkers.append((walker, controller))
+            return True
+        return False
+
+    def _manage_traffic(self) -> None:
+        """Once a second: keep the background traffic moving and complete.
+
+        * A car standing still for NPC_STUCK_SECONDS (not at a red light) is
+          nudged: a lane change, and -- out of the AV's way -- briefly pushing
+          past the car that blocks it (gridlock).  Still stuck after two nudges
+          and out of the operator's view: it is moved to a free spawn point.
+        * A pedestrian standing idle gets a new destination.
+        * A car or pedestrian that CARLA removed (fell through the map, ...) is
+          reported and replaced out of view, so the traffic stays as set."""
+        now = time.monotonic()
+        if self._traffic_manager is None or now < self._next_traffic_check:
+            return
+        self._next_traffic_check = now + 1.0
+        manager, ego = self._traffic_manager, self.ego.get_location()
+        alive = []
+        for car in self._npc_cars:
+            if not car.is_alive:
+                print("[carla] A background car was removed by CARLA (fell through the map or was destroyed); "
+                      "replacing it out of view.")
+                if car in self.spawned:
+                    self.spawned.remove(car)
+                continue
+            alive.append(car)
+            watch = self._npc_watch.setdefault(car.id, {"spot": car.get_location(), "since": now, "tries": 0,
+                                                        "nudged_until": None})
+            here = car.get_location()
+            if watch["nudged_until"] is not None and now >= watch["nudged_until"]:
+                manager.ignore_vehicles_percentage(car, 0)
+                watch["nudged_until"] = None
+            if here.distance(watch["spot"]) > 1.0:
+                watch.update(spot=here, since=now, tries=0)
+                continue
+            if now - watch["since"] < settings.NPC_STUCK_SECONDS:
+                continue
+            watch["since"] = now
+            try:
+                if car.is_at_traffic_light() and car.get_traffic_light_state() != carla.TrafficLightState.Green:
+                    continue                                   # just waiting for its light
+            except (AttributeError, RuntimeError):
+                pass
+            distance = here.distance(ego)
+            if watch["tries"] < 2:
+                watch["tries"] += 1
+                try:
+                    manager.force_lane_change(car, watch["tries"] == 1)    # left first, then right
+                except (AttributeError, RuntimeError):
+                    pass
+                if distance > settings.NPC_NUDGE_MIN_DISTANCE_METERS:     # never pushes past near the AV
+                    manager.ignore_vehicles_percentage(car, 100)
+                    watch["nudged_until"] = now + 3.0
+                continue
+            if distance > settings.NPC_RELOCATE_MIN_DISTANCE_METERS:
+                points = self._npc_spawn_points(settings.NPC_RELOCATE_MIN_DISTANCE_METERS)
+                if points:
+                    car.set_transform(points[0])
+                    watch.update(spot=points[0].location, since=now, tries=0)
+                    print("[carla] A background car stuck out of view was moved to a free spot.")
+        self._npc_cars = alive
+        for _ in range(self._wanted_cars - len(self._npc_cars)):
+            self._spawn_npc_car(away_from_ego=settings.NPC_RELOCATE_MIN_DISTANCE_METERS)
+
+        walkers = []
+        for walker, controller in self._npc_walkers:
+            if not walker.is_alive:
+                print("[carla] A background pedestrian was removed by CARLA; replacing it.")
+                for actor in (walker, controller):
+                    if actor in self.spawned:
+                        self.spawned.remove(actor)
+                try:
+                    controller.stop()
+                    controller.destroy()
+                except RuntimeError:
+                    pass
+                continue
+            walkers.append((walker, controller))
+            watch = self._npc_watch.setdefault(walker.id, {"spot": walker.get_location(), "since": now})
+            if walker.get_location().distance(watch["spot"]) > 0.5:
+                watch.update(spot=walker.get_location(), since=now)
+            elif now - watch["since"] > settings.NPC_PEDESTRIAN_IDLE_SECONDS:
+                controller.go_to_location(self.world.get_random_location_from_navigation())   # off again
+                watch["since"] = now
+        self._npc_walkers = walkers
+        for _ in range(self._wanted_walkers - len(self._npc_walkers)):
+            self._spawn_npc_walker()
 
     def _attach_sensors(self, cameras: Sequence[CameraRequest]) -> None:
         library = self.world.get_blueprint_library()

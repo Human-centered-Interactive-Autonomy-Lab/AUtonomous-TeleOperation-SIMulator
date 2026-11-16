@@ -103,6 +103,13 @@ recorded in the session folder `data/TRAFFIC_<date>_<time>/`:
 For even more traffic, raise the numbers in the scene's `"traffic"` line
 (Town10 has about 150 spawn points for cars).
 
+The terminal reports how much traffic was spawned ("Background traffic: 60
+of 60 cars, 40 of 40 pedestrians"). AUTOSIM keeps it moving and complete:
+a background car stuck for 20 s is nudged, and moved elsewhere if it stays
+stuck out of the operator's view; idle pedestrians walk on; a car or
+pedestrian that CARLA removes (e.g. it fell through the map) is reported
+and replaced. Settings: `NPC_*` in `autosim/settings.py`.
+
 ## Writing your own experiment
 
 | You want to...                               | Read                                           |

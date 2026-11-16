@@ -306,6 +306,17 @@ CURB_SPOT_CHECK_AHEAD_METERS: float = 25.0     # start checking this far before 
 CURB_SPOT_SEARCH_METERS: float = 60.0          # look this far ahead for a free spot
 CURB_SPOT_MARGIN_METERS: float = 2.0           # free space before and after the car
 
+# Background traffic (CARLA's Traffic Manager and walker AI).
+NPC_FOLLOW_DISTANCE_METERS: float = 2.5       # gap background cars keep to the car ahead
+NPC_SPEED_BELOW_LIMIT_PERCENT: float = 20.0   # how far below the speed limit they drive
+# A background car standing still this long (not at a red light) is nudged
+# (lane change; away from the AV also briefly pushing past the car blocking
+# it); still stuck and out of the operator's view, it is moved elsewhere.
+NPC_STUCK_SECONDS: float = 20.0
+NPC_NUDGE_MIN_DISTANCE_METERS: float = 30.0
+NPC_RELOCATE_MIN_DISTANCE_METERS: float = 60.0   # also where lost cars are replaced
+NPC_PEDESTRIAN_IDLE_SECONDS: float = 10.0        # then a background pedestrian walks somewhere new
+
 # Held in AV mode by a stopped vehicle or a pedestrian ahead for this long: the
 # AV stops and asks the operator for help.  Red lights and queues (the car
 # ahead is itself waiting at a light or behind another car) are waited out.
