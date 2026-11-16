@@ -287,6 +287,36 @@ YIELD_GAP_SECONDS: float = 4.0             # cross traffic arriving sooner than 
 YIELD_WATCH_METERS: float = 35.0           # look this far up the other roads for cross traffic
 YIELD_MAX_WAIT_SECONDS: float = 15.0       # then stop and ask the operator (Resume AV crosses)
 
+# Lane changes (pulling over, passing, operator requests) are made only when
+# safe: the gap in the other lane is free and the car is not in, or within
+# this distance of, an intersection (it keeps its lane through intersections).
+LANE_CHANGE_CLEAR_OF_INTERSECTION_METERS: float = 25.0
+LANE_CHANGE_GAP_AHEAD_METERS: float = 8.0      # plus 1 m per m/s of our speed
+LANE_CHANGE_GAP_BEHIND_METERS: float = 10.0    # at least; more for faster cars closing in
+LANE_CHANGE_TIME_GAP_SECONDS: float = 3.0      # time a car behind needs to catch up
+
+# Behind a stopped car (not a queue at a light) for this long: pass it in the
+# next lane in our direction (left first), then go back to the route's lane.
+OVERTAKE_STOPPED_VEHICLES: bool = True
+OVERTAKE_AFTER_SECONDS: float = 5.0
+
+# Pulling over: the stop spot at the curb must be free (no parked car, obstacle
+# or person); otherwise the AV pulls forward to the next free spot.
+CURB_SPOT_CHECK_AHEAD_METERS: float = 25.0     # start checking this far before the spot
+CURB_SPOT_SEARCH_METERS: float = 60.0          # look this far ahead for a free spot
+CURB_SPOT_MARGIN_METERS: float = 2.0           # free space before and after the car
+
+# Background traffic (CARLA's Traffic Manager and walker AI).
+NPC_FOLLOW_DISTANCE_METERS: float = 2.5       # gap background cars keep to the car ahead
+NPC_SPEED_BELOW_LIMIT_PERCENT: float = 20.0   # how far below the speed limit they drive
+# A background car standing still this long (not at a red light) is nudged
+# (lane change; away from the AV also briefly pushing past the car blocking
+# it); still stuck and out of the operator's view, it is moved elsewhere.
+NPC_STUCK_SECONDS: float = 20.0
+NPC_NUDGE_MIN_DISTANCE_METERS: float = 30.0
+NPC_RELOCATE_MIN_DISTANCE_METERS: float = 60.0   # also where lost cars are replaced
+NPC_PEDESTRIAN_IDLE_SECONDS: float = 10.0        # then a background pedestrian walks somewhere new
+
 # Held in AV mode by a stopped vehicle or a pedestrian ahead for this long: the
 # AV stops and asks the operator for help.  Red lights and queues (the car
 # ahead is itself waiting at a light or behind another car) are waited out.
@@ -324,6 +354,11 @@ PASSENGER_DROPOFF_TIMEOUT_SECONDS: float = 20.0       # remove the passenger aft
 # for this long is blocked: the passenger skips ahead on their path, others
 # stop where they are instead of walking into the obstacle forever.
 WALKER_STUCK_SECONDS: float = 2.0
+
+# A passenger getting out or in who gets no closer to where they are going for
+# this long (a curb, a pole, the open door) first jumps, then steps up onto
+# the point, instead of walking against it.
+WALKER_NO_PROGRESS_SECONDS: float = 1.5
 
 # Time budget for a commanded lane change (seconds driving in the old lane
 # first, then the maneuver).
