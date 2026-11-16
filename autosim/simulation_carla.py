@@ -147,6 +147,13 @@ class CarlaSimulation(Simulation):
         self.pickup: Optional[Dict[str, Any]] = None    # the next passenger, waiting or getting in
         self.next_trip_length_m = 0.0               # pickup to drop-off, for the trip being started
         self.lane_return_at_m: Optional[float] = None
+        self.lane_offset = 0                        # lanes right of the route's lane the plan follows (- = left)
+        self.lane_target = 0                        # lane the car wants; changed one lane at a time, when safe
+        self._overtaking: Optional[int] = None      # id of the stopped vehicle being passed
+        self._stuck_behind_since: Optional[float] = None
+        self._curb_pending = False                  # pulling over: not yet in the curb lane
+        self._hazard_vehicle: Optional[Any] = None   # the vehicle BasicAgent is braking for
+        self._next_curb_check = 0.0
         self.ignored_obstacles: set = set()
         self.spawned: List[Any] = []                # everything we must destroy
         self.scene_actor_ids: set = set()           # props/vehicles placed by the scene or tasks
@@ -165,6 +172,7 @@ class CarlaSimulation(Simulation):
         self._light_locations: List[Any] = []
         self._junctions: List[Dict[str, Any]] = []         # intersections along the current route
         self._junctions_route: Optional[_Route] = None      # the route they were found for
+        self._junctions_extended_from: Optional[_Route] = None  # set while a route is being lengthened
         self._junction_asked: Optional[Dict[str, Any]] = None   # blocked intersection the operator was asked about
         self._blocked_since: Optional[float] = None         # held by a vehicle / pedestrian since (AV mode)
         self._BasicAgent = self._GlobalRoutePlanner = self._RoadOption = None
@@ -232,7 +240,7 @@ class CarlaSimulation(Simulation):
         self.agent = self._BasicAgent(self.ego, target_speed=target_speed_mph * MPH_TO_KMH,
                                       opt_dict={"sampling_resolution": ROUTE_STEP_METERS},
                                       map_inst=self.map, grp_inst=self._route_planner())
-        self._set_agent_plan(self.route.waypoints)
+        self._follow_route_lane()
         if time_of_day == "night":
             self.ego.set_light_state(carla.VehicleLightState(
                 carla.VehicleLightState.Position | carla.VehicleLightState.LowBeam))
@@ -322,6 +330,14 @@ class CarlaSimulation(Simulation):
             return carla.VehicleControl(throttle=0.0, brake=brake, hand_brake=stopped)
 
         if mode == DrivingMode.PULLING_OVER:
+            if self.curb_after_m is None:
+                self._update_lane()
+                self._reach_curb_lane()
+                if self._curb_pending and self.state.route_traveled_m >= self.pull_over_end_m - 12.0:
+                    # Not in the curb lane yet (traffic beside us): pull forward until it is safe.
+                    self.pull_over_end_m = self.state.route_traveled_m + 15.0
+                    self._extend_route_to(self.pull_over_end_m + 10.0)
+                self._check_curb_spot()
             if self.state.route_traveled_m >= self.pull_over_end_m or self.agent.done():
                 if stopped:
                     self.set_hazard_lights(True)
@@ -353,7 +369,14 @@ class CarlaSimulation(Simulation):
         # --- autonomous -------------------------------------------------------
         if self.lane_return_at_m is not None and self.state.route_traveled_m >= self.lane_return_at_m:
             self.lane_return_at_m = None
-            self._shift_plan(0)      # back to the original lane
+            self.lane_target = 0     # back to the original lane (when safe)
+        self._update_lane()
+        if self.lane_offset != 0 and self.lane_target == 0 and self._turn_ahead_needs_route_lane():
+            # Still not back in the route's lane before a turn: wait for a gap rather than turn from it.
+            front = self.state.route_traveled_m + self.ego.bounding_box.extent.x
+            if any(0.0 < junction["entry_m"] - front < 10.0 for junction in self._route_junctions()):
+                self.state.waiting_for = "lane change"
+                return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
         remaining_m = self.route.end_distance - self.state.route_traveled_m
         if (not self.route_finishing and remaining_m <= settings.ROUTE_END_PULL_OVER_START_METERS
                 and not any(waypoint.is_junction for waypoint in self.route.waypoints[self.route_index + 1:])):
@@ -379,11 +402,15 @@ class CarlaSimulation(Simulation):
             self._blocked_since = None
             return held
         control = self.agent.run_step()
-        self._note_blocked(self._agent_hazard(control))
+        reason = self._agent_hazard(control)
+        queued = reason == "vehicle ahead" and self._in_queue()
+        self._note_blocked(reason, queued)
+        self._manage_lanes(self._hazard_vehicle if reason == "vehicle ahead" and not queued else None)
         return control
 
     def _agent_hazard(self, control) -> str:
         """Why CARLA's BasicAgent is braking for a hazard: "red light", "vehicle ahead" or ""."""
+        self._hazard_vehicle = None
         if control.throttle > 0.0 or control.brake <= 0.0 or self.state.speed_mph > 3.0:
             return ""
         agent, speed = self.agent, self.state.speed_mps
@@ -391,8 +418,10 @@ class CarlaSimulation(Simulation):
             if agent._affected_by_traffic_light(agent._lights_list,
                                                 agent._base_tlight_threshold + agent._speed_ratio * speed)[0]:
                 return "red light"
-            if agent._vehicle_obstacle_detected(self.world.get_actors().filter("*vehicle*"),
-                                                agent._base_vehicle_threshold + agent._speed_ratio * speed)[0]:
+            found, vehicle, _ = agent._vehicle_obstacle_detected(self.world.get_actors().filter("*vehicle*"),
+                                                                 agent._base_vehicle_threshold + agent._speed_ratio * speed)
+            if found:
+                self._hazard_vehicle = vehicle
                 return "vehicle ahead"
         except (AttributeError, TypeError, RuntimeError):
             pass                       # a different agents version: just no explanation
@@ -422,13 +451,13 @@ class CarlaSimulation(Simulation):
                 return True                         # something right in front of it too
         return False
 
-    def _note_blocked(self, reason: str) -> None:
+    def _note_blocked(self, reason: str, queued: bool = False) -> None:
         """Show why the AV is standing still; if a vehicle or pedestrian keeps it there
         for AV_BLOCKED_ASK_SECONDS, stop and ask the operator (red lights just wait)."""
         if reason:
             self.state.waiting_for = reason
         stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
-        if reason == "vehicle ahead" and self._in_queue():
+        if reason == "vehicle ahead" and queued:
             self.state.waiting_for = "traffic"     # queued behind a held car: just wait
             reason = "traffic"
         if reason not in ("vehicle ahead", "pedestrian") or not stopped:
@@ -509,6 +538,14 @@ class CarlaSimulation(Simulation):
                               "id": junction_id,
                               "turn": _yaw_change(before, after), "signalized": signalized, "stop_m": stop_m,
                               "stopped_at": None, "stop_done": False, "cleared": False, "waiting_since": None})
+        extended = self._junctions_extended_from is not None and self._junctions_extended_from is self._junctions_route
+        previous = {round(j["entry_m"], 1): j for j in self._junctions} if extended else {}
+        self._junctions_extended_from = None
+        for junction in junctions:          # same intersection after the route was extended: keep its state
+            old = previous.get(round(junction["entry_m"], 1))
+            if old is not None:
+                for key in ("stopped_at", "stop_done", "cleared", "waiting_since"):
+                    junction[key] = old[key]
         self._junctions, self._junctions_route = junctions, route
         return junctions
 
@@ -716,13 +753,97 @@ class CarlaSimulation(Simulation):
         if added:
             self.route = _Route(waypoints, self.route.cumulative[0])
 
+    def _extend_route_to(self, route_m: float) -> None:
+        """Lengthen the route along the road until it reaches ``route_m`` (and re-plan in the current lane)."""
+        waypoints, end, added = list(self.route.waypoints), self.route.end_distance, False
+        while end < route_m:
+            options = waypoints[-1].next(ROUTE_STEP_METERS)
+            if not options:
+                break
+            waypoints.append(min(options, key=lambda option: abs(_yaw_change(waypoints[-1], option))))
+            end += ROUTE_STEP_METERS
+            added = True
+        if added:
+            self._junctions_extended_from = self.route      # same route, longer: keep intersection state
+            self.route = _Route(waypoints, self.route.cumulative[0])
+            self.state.route_length_m = self.route.end_distance
+            self._shift_plan(self.lane_offset)
+
+    def _check_curb_spot(self) -> None:
+        """Pulling over: if the stop spot at the curb is taken (parked car, obstacle, person),
+        pull forward to the next free spot instead of stopping into it."""
+        if self._curb_pending or self.curb_after_m is not None:
+            return
+        now = time.monotonic()
+        if now < self._next_curb_check or \
+                self.pull_over_end_m - self.state.route_traveled_m > settings.CURB_SPOT_CHECK_AHEAD_METERS:
+            return
+        self._next_curb_check = now + 0.5
+        if self._curb_spot_free(self.pull_over_end_m):
+            return
+        old = self.pull_over_end_m
+        candidate = old
+        for _ in range(int(settings.CURB_SPOT_SEARCH_METERS / ROUTE_STEP_METERS)):
+            candidate += ROUTE_STEP_METERS
+            self._extend_route_to(candidate + 10.0)
+            if self._curb_spot_free(candidate):
+                break
+        print("[carla] Curb spot taken; pulling forward {:.0f} m to a free one.".format(candidate - old))
+        self.pull_over_end_m = candidate
+
+    def _curb_spot_free(self, route_m: float) -> bool:
+        """Is there room to stop at the curb here: no car, obstacle or person in the way,
+        and not in (or right next to) an intersection?"""
+        half = self.ego.bounding_box.extent.x
+        for junction in self._route_junctions():
+            if junction["entry_m"] - 3.0 < route_m + half and junction["exit_m"] + 3.0 > route_m - half:
+                return False
+        waypoint = self.route.waypoints[self.route.index_at(route_m)]
+        lane = _lanes_over(waypoint, self.lane_offset, driving_only=True) or waypoint
+        center, forward, right = lane.transform.location, lane.transform.get_forward_vector(), \
+            lane.transform.get_right_vector()
+        edge = lane.lane_width / 2.0 + 0.5
+        beside = lane.get_right_lane()
+        if beside is not None and beside.lane_type in (carla.LaneType.Shoulder, carla.LaneType.Parking):
+            edge += beside.lane_width
+        passengers = self._passenger_ids()
+        actors = [a for a in self.world.get_actors().filter("vehicle.*") if a.id != self.ego.id]
+        actors += [a for a in self.world.get_actors().filter("walker.pedestrian.*") if a.id not in passengers]
+        actors += [a for a in self.spawned if a.id in self.scene_actor_ids and a not in actors]
+        for actor in actors:
+            if actor.type_id.startswith("vehicle."):
+                velocity = actor.get_velocity()
+                if math.hypot(velocity.x, velocity.y) > 1.0:
+                    continue                     # moving traffic passes; only standing things take the spot
+            offset = actor.get_location() - center
+            along = offset.x * forward.x + offset.y * forward.y
+            side = offset.x * right.x + offset.y * right.y
+            box = getattr(actor, "bounding_box", None)
+            reach = half + (box.extent.x if box is not None else 0.5) + settings.CURB_SPOT_MARGIN_METERS
+            if -reach < along < reach and -0.5 < side < edge:
+                return False
+        return True
+
     def _steer_to_curb(self) -> None:
-        """Follow the rest of the plan along the right edge of the rightmost lane, slowly."""
-        # 1. Move to the rightmost driving lane (same direction of travel).
+        """Pull over: move to the rightmost lane (lane change made when safe), then
+        follow the right edge of that lane slowly."""
         route_waypoint = self.route.waypoints[min(self.route_index, len(self.route.waypoints) - 1)]
-        rightmost, lanes_to_right = _rightmost_lane(route_waypoint)
-        self._shift_plan(lanes_to_right)
-        # 2. Drive along the right edge of that lane (or on the shoulder / parking lane).
+        _, lanes_to_right = _rightmost_lane(route_waypoint)
+        self.lane_target = lanes_to_right
+        self._overtaking = None
+        self._curb_pending = True
+        self.agent.set_offset(0.0)
+        self.agent.set_target_speed(min(self.target_speed_mph, settings.INTERSECTION_APPROACH_SPEED_MPH) * MPH_TO_KMH)
+        self._update_lane()
+        self._reach_curb_lane()
+
+    def _reach_curb_lane(self) -> None:
+        """Once in the rightmost lane: drive along its right edge (or the shoulder / parking lane), slowly."""
+        if not self._curb_pending or self.lane_offset != self.lane_target:
+            return
+        self._curb_pending = False
+        route_waypoint = self.route.waypoints[min(self.route_index, len(self.route.waypoints) - 1)]
+        rightmost = _lanes_over(route_waypoint, self.lane_offset, driving_only=True) or route_waypoint
         offset = rightmost.lane_width / 2.0 - 1.0 - settings.PULL_OVER_EDGE_MARGIN_METERS
         right = rightmost.get_right_lane()
         if right is not None and right.lane_type in (carla.LaneType.Shoulder, carla.LaneType.Parking):
@@ -738,7 +859,8 @@ class CarlaSimulation(Simulation):
         if target is None or target.lane_type != carla.LaneType.Driving:
             return False
         opposite = (target.lane_id > 0) != (here.lane_id > 0)
-        self._shift_plan(-1 if direction == "left" else 1)
+        self.lane_target = self.lane_offset + (-1 if direction == "left" else 1)   # made when it is safe
+        self._update_lane()
         if opposite:   # do not stay on the wrong side of the road
             self.lane_return_at_m = self.state.route_traveled_m + OPPOSITE_LANE_RETURN_AFTER_METERS
         return True
@@ -771,7 +893,7 @@ class CarlaSimulation(Simulation):
         self._extend_route_past_junction()
         self.route_index = 0
         self.lane_return_at_m = None
-        self._set_agent_plan(self.route.waypoints)
+        self._follow_route_lane()
         return True
 
     def _obstacle_along(self, waypoints: List[Any], reach: float) -> Optional[Any]:
@@ -817,7 +939,7 @@ class CarlaSimulation(Simulation):
         self.curb_after_m = None
         self.agent.set_offset(0.0)
         self.agent.set_target_speed(self.target_speed_mph * MPH_TO_KMH)
-        self._set_agent_plan(self.route.waypoints)
+        self._follow_route_lane()
         self.set_hazard_lights(False)
         self.stop_reason = ""
         self.mode = DrivingMode.AUTONOMOUS
@@ -1028,28 +1150,169 @@ class CarlaSimulation(Simulation):
     def _remaining_route_waypoints(self) -> List[Any]:
         return self.route.waypoints[self.route_index:] if self.route else []
 
+    def _follow_route_lane(self) -> None:
+        """Plan along the route in the route's own lane (a new or changed route)."""
+        self.lane_offset = self.lane_target = 0
+        self._overtaking = None
+        self._set_agent_plan(self.route.waypoints[self.route_index:] or self.route.waypoints)
+
     def _shift_plan(self, lanes: int) -> None:
-        """Follow the remaining route ``lanes`` lanes to the right (negative = left), 0 = original lane."""
+        """Follow the remaining route ``lanes`` lanes to the right (negative = left), 0 = original lane.
+
+        Through an intersection the plan stays in the lane the car is in (no lane
+        change inside it): from the last lane point before it, it follows that lane's
+        own continuation, the one heading the way the route does."""
         remaining = self._remaining_route_waypoints()
-        skip = int(LANE_CHANGE_SKIP_METERS / ROUTE_STEP_METERS)
-        shifted = []
+        changing = lanes != self.lane_offset
+        skip = int(LANE_CHANGE_SKIP_METERS / ROUTE_STEP_METERS) if changing else 1
+        self.lane_offset = lanes
+        shifted, traced = [], None
         for waypoint in remaining[skip:]:
+            if lanes == 0:
+                shifted.append(waypoint)
+                continue
+            if waypoint.is_junction and traced is not None:
+                options = traced.next(ROUTE_STEP_METERS)
+                if options:
+                    traced = min(options, key=lambda option: abs(
+                        (option.transform.rotation.yaw - waypoint.transform.rotation.yaw + 180.0) % 360.0 - 180.0))
+                shifted.append(traced)
+                continue
             target = _lanes_over(waypoint, lanes, driving_only=True)
-            shifted.append(target if target is not None else waypoint)
+            traced = target if target is not None else waypoint
+            shifted.append(traced)
         if shifted:
             self._set_agent_plan(shifted)
+
+    # --- lane changes (all of them: pull over, operator, passing, returning) ----
+
+    def _update_lane(self) -> None:
+        """Move one lane toward ``lane_target`` when that is safe; otherwise keep the lane."""
+        if self.lane_target == self.lane_offset or self.route is None:
+            return
+        step = self.lane_offset + (1 if self.lane_target > self.lane_offset else -1)
+        blocker = self._lane_change_blocker(step)
+        if blocker is None:
+            print("[carla] Lane change {}.".format("right" if step > self.lane_offset else "left"))
+            self._shift_plan(step)
+
+    def _lane_change_blocker(self, lanes: int) -> Optional[Any]:
+        """Why a change to ``lanes`` is not safe now (an object or a reason string), or None."""
+        here = self.map.get_waypoint(self.ego.get_location())
+        if here is None or here.is_junction:
+            return "in an intersection"
+        front = self.state.route_traveled_m + self.ego.bounding_box.extent.x
+        returning_for_turn = lanes == 0 and self._turn_ahead_needs_route_lane()
+        clearance = 8.0 if returning_for_turn else settings.LANE_CHANGE_CLEAR_OF_INTERSECTION_METERS
+        for junction in self._route_junctions():
+            if junction["entry_m"] - clearance < front + LANE_CHANGE_SKIP_METERS and \
+                    junction["exit_m"] + 2.0 > front - 2 * self.ego.bounding_box.extent.x:
+                return "near an intersection"
+        index = min(self.route_index, len(self.route.waypoints) - 1)
+        ahead = min(index + int((LANE_CHANGE_SKIP_METERS + 10.0) / ROUTE_STEP_METERS), len(self.route.waypoints) - 1)
+        for waypoint in (self.route.waypoints[index], self.route.waypoints[ahead]):
+            if lanes != 0 and _lanes_over(waypoint, lanes, driving_only=True) is None:
+                return "no such lane"
+        return self._vehicle_in_lane(lanes)
+
+    def _vehicle_in_lane(self, lanes: int) -> Optional[Any]:
+        """A vehicle (or placed obstacle) in the gap the car would change into, or None."""
+        route, traveled = self.route, self.state.route_traveled_m
+        lane_width = self.route.waypoints[min(self.route_index, len(route.waypoints) - 1)].lane_width
+        target_lateral = lanes * lane_width
+        my_speed, ego = self.state.speed_mps, self.ego.get_location()
+        candidates = [a for a in self.world.get_actors().filter("vehicle.*") if a.id != self.ego.id]
+        candidates += [a for a in self.spawned if a.id in self.scene_actor_ids and not a.type_id.startswith("walker.")
+                       and a not in candidates]
+        for actor in candidates:
+            location = actor.get_location()
+            if location.distance(ego) > 70.0:
+                continue
+            route_m, lateral, _ = route.project(location.x, location.y, near_index=max(0, self.route_index - 15),
+                                                window=90)
+            if abs(lateral - target_lateral) > 0.6 * lane_width:
+                continue
+            velocity = actor.get_velocity()
+            closing = math.hypot(velocity.x, velocity.y) - my_speed      # how fast it catches up from behind
+            behind = max(settings.LANE_CHANGE_GAP_BEHIND_METERS, closing * settings.LANE_CHANGE_TIME_GAP_SECONDS + 6.0)
+            ahead = settings.LANE_CHANGE_GAP_AHEAD_METERS + my_speed
+            if -behind < route_m - traveled < ahead:
+                return actor
+        return None
+
+    def _turn_ahead_needs_route_lane(self) -> bool:
+        """Does the route turn at an intersection within 60 m (so the car must be in the route's lane)?"""
+        front = self.state.route_traveled_m + self.ego.bounding_box.extent.x
+        return any(0.0 < junction["entry_m"] - front < 60.0 and abs(junction["turn"]) > 30.0
+                   for junction in self._route_junctions())
+
+    def _manage_lanes(self, hazard_vehicle: Optional[Any]) -> None:
+        """AV mode: pass a stopped car in the next lane, then go back to the route's lane."""
+        now = time.monotonic()
+        stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
+        if self._overtaking is not None or (self.lane_target != 0 and not self._curb_pending):
+            passed = True
+            if self._overtaking is not None:
+                actor = self.world.get_actor(self._overtaking)
+                if actor is not None:
+                    location = actor.get_location()
+                    actor_m = self.route.project(location.x, location.y, near_index=max(0, self.route_index - 15),
+                                                 window=90)[0]
+                    passed = actor_m < self.state.route_traveled_m - 2 * self.ego.bounding_box.extent.x - 6.0
+            if passed or self._turn_ahead_needs_route_lane():
+                self._overtaking = None
+                self.lane_target = 0                  # keep right except to pass
+        if hazard_vehicle is None or not stopped or not settings.OVERTAKE_STOPPED_VEHICLES:
+            self._stuck_behind_since = None
+            return
+        if self._stuck_behind_since is None:
+            self._stuck_behind_since = now
+            return
+        if now - self._stuck_behind_since < settings.OVERTAKE_AFTER_SECONDS or self.lane_target != self.lane_offset:
+            return
+        if self._turn_ahead_needs_route_lane():
+            return
+        waypoint = self.route.waypoints[min(self.route_index, len(self.route.waypoints) - 1)]
+        for side in (-1, 1):                          # left lane first, else a free lane on the right
+            lane = _lanes_over(waypoint, self.lane_offset + side, driving_only=True)
+            if lane is not None and (lane.lane_id > 0) == (waypoint.lane_id > 0):   # same direction only
+                if self._lane_change_blocker(self.lane_offset + side) is None:
+                    print("[carla] Passing a stopped {} on the {}.".format(_describe(hazard_vehicle),
+                                                                          "left" if side < 0 else "right"))
+                    self._overtaking = hazard_vehicle.id
+                    self.lane_target = self.lane_offset + side
+                    self._stuck_behind_since = None
+                    self._update_lane()
+                    return
 
     def _replan_from_here(self, minimum_length: float = 0.0) -> None:
         """New plan from the car's current position along the rest of the route."""
         if self.route is None:
             return
-        _, _, index = self.route.project(self.ego.get_location().x, self.ego.get_location().y)
+        _, lateral, index = self.route.project(self.ego.get_location().x, self.ego.get_location().y)
         remaining = self.route.waypoints[index + 1:]
         if len(remaining) * ROUTE_STEP_METERS < minimum_length:
             start = self.map.get_waypoint(self.ego.get_location())
             remaining = self._plan_route(start, RouteSpec({"length_m": minimum_length}))[1:]
-        if remaining:
-            self._set_agent_plan(remaining)
+            self.lane_offset = self.lane_target = 0
+            if remaining:
+                self._set_agent_plan(remaining)
+            return
+        # Continue in the lane the car is in now (e.g. after manual driving); lane
+        # changes back to the route's lane are then made when safe.
+        waypoint = self.route.waypoints[index]
+        lanes = int(round(lateral / max(1.0, waypoint.lane_width)))
+        while lanes != 0 and _lanes_over(waypoint, lanes, driving_only=True) is None:
+            lanes -= 1 if lanes > 0 else -1
+        self.route_index = index
+        self.lane_offset = lanes
+        self.lane_target = 0
+        self._overtaking = None
+        if lanes == 0:
+            if remaining:
+                self._set_agent_plan(remaining)
+        else:
+            self._shift_plan(lanes)
 
     # --- actors -------------------------------------------------------------
 
@@ -1290,7 +1553,11 @@ class CarlaSimulation(Simulation):
             self._start_destination_leg()
             return
         if not pickup["boarding"]:
-            pickup.update(boarding=True, target=self._beside_rear_door(0.4), started=time.monotonic())
+            target = self._beside_rear_door(0.4)
+            walk = pickup["walker"].get_location().distance(target)     # longer if the car pulled forward
+            pickup.update(boarding=True, target=target, started=time.monotonic(),
+                          timeout=max(settings.PASSENGER_BOARDING_TIMEOUT_SECONDS,
+                                      walk / settings.PASSENGER_WALK_SPEED_MPS + 8.0))
             self.walker_progress.pop(pickup["walker"].id, None)
         self._set_passenger_door(True)
         print("[carla] Passenger getting in.")
@@ -1303,7 +1570,7 @@ class CarlaSimulation(Simulation):
         walker = pickup["walker"]
         arrived = self._walker_stuck(walker) or \
             _walk_towards(walker, pickup["target"], settings.PASSENGER_WALK_SPEED_MPS)
-        if not arrived and time.monotonic() - pickup["started"] < settings.PASSENGER_BOARDING_TIMEOUT_SECONDS:
+        if not arrived and time.monotonic() - pickup["started"] < pickup.get("timeout", settings.PASSENGER_BOARDING_TIMEOUT_SECONDS):
             return
         self.pickup = None
         self.passenger_look = walker.type_id   # the same person gets out at the destination
