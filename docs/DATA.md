@@ -39,7 +39,8 @@ getting out at the end of a trip), `route_complete`, `driving_to_pickup`
 (the AV drives on to the next passenger), `passenger_pickup_started`/
 `passenger_picked_up` (the next passenger getting in); these carry a
 `trip` number (1 = the scenario's own route),
-`task_error`, `scenario_end`, plus anything task scripts log.
+`outcome_not_applied` (an answer given while the operator was driving manually;
+the AV does not act on it), `task_error`, `scenario_end`, plus anything task scripts log.
 
 Traffic rules in AV mode log `av_waiting` when a rule holds the car and
 `av_waiting_end` when it lets go; `reason` is `stop sign`, `cross traffic`,

@@ -268,6 +268,13 @@ class ScenarioSession:
             else:
                 function()
 
+        if self.manual_control_active and name in ("continue", "change_lane_left", "change_lane_right",
+                                                   "pull_over", "reroute"):
+            # The operator is driving: an answer must not take the wheel away.
+            self.log("outcome_not_applied", outcome=outcome, reason="manual control")
+            self.feedback("You are driving manually: answer recorded. Press Resume AV to hand back.")
+            return
+
         if name == "continue":
             run(simulation.resume_autonomy)
         elif name in ("change_lane_left", "change_lane_right"):
@@ -301,10 +308,14 @@ class ScenarioSession:
         # No pop-up here: "Manual: W A S D / arrow keys" stays in the Actions corner while active.
         return True
 
-    def resume_autonomy(self) -> None:
+    def release_manual_control(self) -> None:
+        """End manual driving on the vehicle too (in order with the commands that follow)."""
         if self.manual_control_active:
             self.manual_control_active = False
             self.send_vehicle_command("manual_off", lambda: self.simulation.set_manual_control(False))
+
+    def resume_autonomy(self) -> None:
+        self.release_manual_control()
         self.send_vehicle_command("resume_av", self.simulation.resume_autonomy)
         self.feedback("Resuming AV mode.")
 
