@@ -118,6 +118,34 @@ class _Route:
         return best[1], best[2], best[3]
 
 
+class _ParkedCar:
+    """A parked car that belongs to the map (an environment object, not an actor), made
+    to look like a standing vehicle actor for the AV's checks."""
+
+    type_id = "vehicle.parked.parked car"
+
+    def __init__(self, ident: int, box) -> None:
+        self.id = ident                    # negative: never clashes with an actor id
+        location = box.location
+        self._transform = carla.Transform(carla.Location(location.x, location.y, location.z),
+                                          carla.Rotation(yaw=box.rotation.yaw))
+        self.bounding_box = _Box(box.extent)
+
+    def get_location(self):
+        return self._transform.location
+
+    def get_transform(self):
+        return self._transform
+
+    def get_velocity(self):
+        return carla.Vector3D(0.0, 0.0, 0.0)
+
+
+class _Box:
+    def __init__(self, extent) -> None:
+        self.extent = extent
+
+
 class CarlaSimulation(Simulation):
     """See module docstring."""
 
@@ -187,6 +215,7 @@ class CarlaSimulation(Simulation):
         self._junction_asked: Optional[Dict[str, Any]] = None   # blocked intersection the operator was asked about
         self._red_turn: Optional[Dict[str, Any]] = None     # intersection we are turning right on red at
         self._light_stops: List[Tuple[Any, Any, float]] = []    # (traffic light, its stop line, lane yaw)
+        self._parked_cars: List["_ParkedCar"] = []          # parked cars that are part of the map (not actors)
         self._blocked_since: Optional[float] = None         # held by a vehicle / pedestrian since (AV mode)
         self._BasicAgent = self._GlobalRoutePlanner = self._RoadOption = None
 
@@ -527,8 +556,36 @@ class CarlaSimulation(Simulation):
                 pass
         self._junctions_route = None
         self._junction_asked = None
-        print("[carla] Traffic rules: {} stop signs, {} traffic lights on this map.".format(
-            len(self._stop_signs), len(self._light_locations)))
+        self._parked_cars = self._find_parked_cars()
+        print("[carla] Traffic rules: {} stop signs, {} traffic lights, {} parked cars on this map.".format(
+            len(self._stop_signs), len(self._light_locations), len(self._parked_cars)))
+
+    def _find_parked_cars(self) -> List["_ParkedCar"]:
+        """Parked cars that are part of the map itself (e.g. Town10's), which are not actors:
+        CARLA's BasicAgent and the actor checks cannot see them, so the AV would pull
+        over (or change lanes) right into them."""
+        found: List[_ParkedCar] = []
+        labels = [getattr(carla.CityObjectLabel, name) for name in ("Car", "Truck", "Bus", "Motorcycle", "Vehicles")
+                  if hasattr(getattr(carla, "CityObjectLabel", None), name)]
+        actors = [a.get_location() for a in self.world.get_actors().filter("vehicle.*")]
+        seen = set()
+        for label in labels:
+            try:
+                objects = self.world.get_environment_objects(label)
+            except (AttributeError, RuntimeError):
+                continue
+            for item in objects:
+                box = item.bounding_box
+                if item.id in seen or not 1.2 < box.extent.x < 9.0 or not 0.5 < box.extent.y < 2.0:
+                    continue                                # not a single vehicle (e.g. a merged mesh)
+                if any(box.location.distance(spot) < 1.0 for spot in actors):
+                    continue                                # an actor after all
+                seen.add(item.id)
+                found.append(_ParkedCar(-len(found) - 1, box))
+        return found
+
+    def _parked_near(self, location, radius: float) -> List["_ParkedCar"]:
+        return [car for car in self._parked_cars if car.get_location().distance(location) < radius]
 
     def _route_junctions(self) -> List[Dict[str, Any]]:
         """The intersections along the current route (found once per route)."""
@@ -1079,7 +1136,9 @@ class CarlaSimulation(Simulation):
         """A standing vehicle just behind the intersection in our lane, leaving no room for us."""
         half = self.ego.bounding_box.extent.x
         lane_width = self.route.waypoints[min(self.route_index, len(self.route.waypoints) - 1)].lane_width
-        for vehicle in self.world.get_actors().filter("vehicle.*"):
+        vehicles = list(self.world.get_actors().filter("vehicle.*")) + self._parked_near(junction["center"],
+                                                                                          junction["radius"] + 20.0)
+        for vehicle in vehicles:
             if vehicle.id == self.ego.id:
                 continue
             velocity = vehicle.get_velocity()
@@ -1233,6 +1292,7 @@ class CarlaSimulation(Simulation):
             velocity = vehicle.get_velocity()
             if vehicle.id != self.ego.id and math.hypot(velocity.x, velocity.y) < 1.0 and vehicle not in candidates:
                 candidates.append(vehicle)
+        candidates += self._parked_near(ego, reach + 15.0)
         best = None
         for actor in candidates:
             location = actor.get_location()
@@ -1312,6 +1372,7 @@ class CarlaSimulation(Simulation):
         actors = [a for a in self.world.get_actors().filter("vehicle.*") if a.id != self.ego.id]
         actors += [a for a in self.world.get_actors().filter("walker.pedestrian.*") if a.id not in passengers]
         actors += [a for a in self.spawned if a.id in self.scene_actor_ids and a not in actors]
+        actors += self._parked_near(center, 15.0)
         for actor in actors:
             if actor.type_id.startswith("vehicle."):
                 velocity = actor.get_velocity()
@@ -1738,6 +1799,7 @@ class CarlaSimulation(Simulation):
         candidates = [a for a in self.world.get_actors().filter("vehicle.*") if a.id != self.ego.id]
         candidates += [a for a in self.spawned if a.id in self.scene_actor_ids and not a.type_id.startswith("walker.")
                        and a not in candidates]
+        candidates += self._parked_near(ego, 70.0)
         for actor in candidates:
             location = actor.get_location()
             if location.distance(ego) > 70.0:
@@ -1767,7 +1829,8 @@ class CarlaSimulation(Simulation):
         if self._overtaking is not None or (self.lane_target != 0 and not self._curb_pending):
             passed = True
             if self._overtaking is not None:
-                actor = self.world.get_actor(self._overtaking)
+                actor = (self.world.get_actor(self._overtaking) if self._overtaking >= 0 else
+                         next((car for car in self._parked_cars if car.id == self._overtaking), None))
                 if actor is not None:
                     location = actor.get_location()
                     actor_m = self.route.project(location.x, location.y, near_index=max(0, self.route_index - 15),
@@ -2359,6 +2422,7 @@ class CarlaSimulation(Simulation):
         ego_m, ego_lateral, _ = self.route.project(ego_location.x, ego_location.y, near_index=self.route_index)
         found = []
         candidates = [a for a in self.spawned if a.id in self.scene_actor_ids and a.id not in self.ignored_obstacles]
+        candidates += [car for car in self._parked_near(ego_location, reach + 10.0) if car.id not in self.ignored_obstacles]
         if walkers:
             passengers = self._passenger_ids()
             candidates += [a for a in self.world.get_actors().filter("walker.pedestrian.*")
