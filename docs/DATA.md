@@ -44,7 +44,11 @@ the AV does not act on it), `task_error`, `scenario_end`, plus anything task scr
 
 Traffic rules in AV mode log `av_waiting` when a rule holds the car and
 `av_waiting_end` when it lets go; `reason` is `stop sign`, `cross traffic`,
-`red light`, `traffic` (queued behind a waiting car), `vehicle ahead` or `pedestrian`.
+`red light`, `traffic` (queued behind a waiting car), `vehicle ahead`, `pedestrian`,
+`space after intersection` (no room to clear the intersection, so the car waits at its line)
+or `lane change` (waiting to get back into the lane it needs for a turn).
+`cross traffic` also covers giving way at an all-way stop to a car that stopped first
+(or at the same time, on the right) and, at a green light, to oncoming traffic when turning left.
 
 ## scenarios.csv
 
