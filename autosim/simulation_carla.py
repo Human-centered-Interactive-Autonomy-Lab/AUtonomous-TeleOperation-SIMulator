@@ -807,7 +807,9 @@ class CarlaSimulation(Simulation):
                 points.append((x, y, s))
             if speed <= 0.3:              # standing: its whole body
                 extent = vehicle.bounding_box.extent.x
-                points = [(location.x + heading.x * d, location.y + heading.y * d, 0.0) for d in (-extent, 0.0, extent)]
+                count = max(2, int(2 * extent / 0.5))
+                points = [(location.x + heading.x * d, location.y + heading.y * d, 0.0)
+                          for d in (-extent + 2 * extent * k / count for k in range(count + 1))]
             return [{"points": points, "inside": True, "entry_m": 0.0, "control": None, "light": None,
                      "from": self._approach_side(math.degrees(math.atan2(heading.y, heading.x)), junction)}]
         forward = lane.transform.get_forward_vector()
@@ -934,7 +936,12 @@ class CarlaSimulation(Simulation):
                 if collision_only and speed <= 0.3:
                     continue
                 if other["inside"] and speed <= 0.3:
-                    return vehicle, our_in         # standing in the intersection, in our way
+                    # Standing in the intersection: in our way only if we cannot pass it with
+                    # room to spare, and only if it is ahead of us (not alongside).
+                    tight = _first_conflict(path, other["points"], our_half.y + extent.y + 0.3)
+                    if tight is not None and tight[0] > 0.5:
+                        return vehicle, tight[0]
+                    continue
                 if speed <= 0.3:
                     continue                       # waiting at its line: arrival order decides
                 will_stop = False
@@ -1060,9 +1067,18 @@ class CarlaSimulation(Simulation):
             return None                                    # we are not stopped at the line
         ego = self.ego.get_transform()
         right = ego.get_right_vector()
+        # Its turn, but it does not take it (stalled, or waving us through): after a while, go.
+        # (If it does move off meanwhile, the crossing check gives way to it.)
+        ready = junction.get("stopped_at") or ours
+        waved = time.monotonic() - max(ready, ours) > settings.STOP_SIGN_WAIT_SECONDS + settings.WAVE_THROUGH_SECONDS
         for vehicle_id, arrived in sorted(junction.get("arrivals", {}).items(), key=lambda item: item[1]):
             vehicle = self.world.get_actor(vehicle_id)
             if vehicle is None:
+                continue
+            if waved:
+                if vehicle_id not in junction.setdefault("waved", set()):
+                    junction["waved"].add(vehicle_id)
+                    print("[carla] {} is not taking its turn; going.".format(_describe(vehicle)))
                 continue
             offset = vehicle.get_location() - ego.location
             first = arrived < ours - 0.5

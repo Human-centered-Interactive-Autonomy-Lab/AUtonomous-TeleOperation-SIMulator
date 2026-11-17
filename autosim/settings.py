@@ -286,6 +286,7 @@ INTERSECTION_APPROACH_SPEED_MPH: float = 12.0   # into intersections without lig
 YIELD_GAP_SECONDS: float = 2.0             # time to spare between us and another car where our paths cross
 YIELD_WATCH_METERS: float = 90.0           # look this far up the other roads (fast cross traffic)
 RIGHT_ON_RED: bool = True                  # after a full stop, turn right on red when the way is clear
+WAVE_THROUGH_SECONDS: float = 4.0          # a car whose turn it is but that does not go: then go
 YIELD_MAX_WAIT_SECONDS: float = 15.0       # then stop and ask the operator (Resume AV crosses)
 
 # Lane changes (pulling over, passing, operator requests) are made only when
