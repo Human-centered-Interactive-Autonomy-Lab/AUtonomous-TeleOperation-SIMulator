@@ -307,6 +307,10 @@ OVERTAKE_AFTER_SECONDS: float = 5.0
 CURB_SPOT_CHECK_AHEAD_METERS: float = 25.0     # start checking this far before the spot
 CURB_SPOT_SEARCH_METERS: float = 60.0          # look this far ahead for a free spot
 CURB_SPOT_MARGIN_METERS: float = 2.0           # free space before and after the car
+CURB_SPOT_ENTRY_METERS: float = 8.0            # plus this much free behind it, to drive into it
+CURB_APPROACH_METERS: float = 10.0             # steer to the curb only this close to the spot
+CURB_SPOT_GIVE_UP_METERS: float = 300.0        # no free spot within this: ask the operator
+CURB_SEARCH_SPEED_MPH: float = 15.0           # driving on in the lane, looking for a free spot
 CURB_CLEAR_BEFORE_INTERSECTION_METERS: float = 10.0   # no stopping this close before one (~30 ft)
 CURB_CLEAR_AFTER_INTERSECTION_METERS: float = 6.0     # ... or after one (~20 ft)
 
