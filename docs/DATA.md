@@ -46,7 +46,8 @@ Traffic rules in AV mode log `av_waiting` when a rule holds the car and
 `av_waiting_end` when it lets go; `reason` is `stop sign`, `cross traffic`,
 `red light`, `traffic` (queued behind a waiting car), `vehicle ahead`, `pedestrian`,
 `space after intersection` (no room to clear the intersection, so the car waits at its line)
-or `lane change` (waiting to get back into the lane it needs for a turn).
+`lane change` (waiting for a gap to get into the lane it needs for a turn, or to pass
+a parked car) or `obstacle` (braking for something solid right ahead that is not an actor).
 `cross traffic` means the AV is giving way to a vehicle whose path it would cross at
 about the same time and that has the right of way (or is already in the intersection,
 or is running its stop sign / red light); at an all-way stop also a car that stopped first
