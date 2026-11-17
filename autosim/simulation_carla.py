@@ -185,6 +185,8 @@ class CarlaSimulation(Simulation):
         self._junctions_route: Optional[_Route] = None      # the route they were found for
         self._junctions_extended_from: Optional[_Route] = None  # set while a route is being lengthened
         self._junction_asked: Optional[Dict[str, Any]] = None   # blocked intersection the operator was asked about
+        self._red_turn: Optional[Dict[str, Any]] = None     # intersection we are turning right on red at
+        self._light_stops: List[Tuple[Any, Any, float]] = []    # (traffic light, its stop line, lane yaw)
         self._blocked_since: Optional[float] = None         # held by a vehicle / pedestrian since (AV mode)
         self._BasicAgent = self._GlobalRoutePlanner = self._RoadOption = None
 
@@ -514,8 +516,15 @@ class CarlaSimulation(Simulation):
             lane = self.map.get_waypoint(zone)
             if lane is not None:
                 self._stop_signs.append((zone, lane.transform.rotation.yaw))
-        self._light_locations = [light.get_location()
-                                 for light in self.world.get_actors().filter("traffic.traffic_light")]
+        lights = list(self.world.get_actors().filter("traffic.traffic_light"))
+        self._light_locations = [light.get_location() for light in lights]
+        self._light_stops = []
+        for light in lights:              # which light controls which lane (for other cars' lights)
+            try:
+                for stop in light.get_stop_waypoints():
+                    self._light_stops.append((light, stop.transform.location, stop.transform.rotation.yaw))
+            except (AttributeError, RuntimeError):
+                pass
         self._junctions_route = None
         self._junction_asked = None
         print("[carla] Traffic rules: {} stop signs, {} traffic lights on this map.".format(
@@ -562,8 +571,11 @@ class CarlaSimulation(Simulation):
                         stop_m = entry_m - settings.STOP_LINE_SETBACK_METERS
                         break
             exit_m = route.cumulative[index] if index < len(waypoints) else route.end_distance
+            others_stop = not signalized and stop_m is None and any(
+                zone.distance(center) < radius + 25.0 for zone, _ in self._stop_signs)
             junctions.append({"entry_m": entry_m, "exit_m": exit_m, "center": center, "radius": radius,
-                              "id": junction_id,
+                              "id": junction_id, "entry_yaw": before.transform.rotation.yaw, "entry_wp": before,
+                              "others_stop": others_stop, "light": None, "red_stop_at": None,
                               "turn": _yaw_change(before, after), "signalized": signalized, "stop_m": stop_m,
                               "stopped_at": None, "stop_done": False, "cleared": False, "waiting_since": None,
                               "arrived_at": None, "arrivals": {}})
@@ -573,7 +585,8 @@ class CarlaSimulation(Simulation):
         for junction in junctions:          # same intersection after the route was extended: keep its state
             old = previous.get(round(junction["entry_m"], 1))
             if old is not None:
-                for key in ("stopped_at", "stop_done", "cleared", "waiting_since", "arrived_at", "arrivals"):
+                for key in ("stopped_at", "stop_done", "cleared", "waiting_since", "arrived_at", "arrivals",
+                            "light", "red_stop_at"):
                     junction[key] = old[key]
         self._junctions, self._junctions_route = junctions, route
         return junctions
@@ -588,15 +601,26 @@ class CarlaSimulation(Simulation):
             if limit and limit > 0:
                 desired_kmh = min(desired_kmh, limit)
         front = self.state.route_traveled_m + self.ego.bounding_box.extent.x
+        # The intersection ahead, or the one we are in (watched until we are out of it).
         junction = next((j for j in self._route_junctions()
-                         if front - 0.5 < j["entry_m"] <= front + settings.INTERSECTION_LOOKAHEAD_METERS), None)
-        if junction is not None and not junction["signalized"]:
-            now = time.monotonic()
-            stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
-            desired_kmh = min(desired_kmh, settings.INTERSECTION_APPROACH_SPEED_MPH * MPH_TO_KMH)
+                         if j["entry_m"] <= front + settings.INTERSECTION_LOOKAHEAD_METERS
+                         and front < j["exit_m"] + 1.0), None)
+        if self._red_turn is not None and junction is not self._red_turn:
+            self._red_turn = None                       # through the right turn on red: obey lights again
+            self._agent_ignores_lights(False)
+        if junction is None:
+            self.agent.set_target_speed(desired_kmh)
+            return None
+        now = time.monotonic()
+        stopped = self.state.speed_mph < settings.STOPPED_SPEED_MPH
+        if not junction["signalized"]:
+            if junction["stop_m"] is not None or not junction["others_stop"] or abs(junction["turn"]) > 30.0:
+                desired_kmh = min(desired_kmh, settings.INTERSECTION_APPROACH_SPEED_MPH * MPH_TO_KMH)
+            stop_sign = settings.OBEY_STOP_SIGNS and junction["stop_m"] is not None
+            if front > junction["entry_m"]:
+                junction["stop_done"] = True            # already in it (e.g. the operator sent it on)
             if settings.YIELD_AT_INTERSECTIONS:
                 self._track_arrivals(junction, now)     # from the start, so earlier arrivals keep their turn
-            stop_sign = settings.OBEY_STOP_SIGNS and junction["stop_m"] is not None
             if stop_sign and not junction["stop_done"]:
                 to_line = junction["stop_m"] - front
                 desired_kmh = min(desired_kmh, max(3.0, math.sqrt(
@@ -612,69 +636,349 @@ class CarlaSimulation(Simulation):
                         self.state.waiting_for = "stop sign"
                         return carla.VehicleControl(throttle=0.0, brake=1.0, hand_brake=True)
                     junction["stop_done"] = True
-            if settings.YIELD_AT_INTERSECTIONS and not junction["cleared"] and \
-                    (not stop_sign or junction["stop_done"]):
-                held = self._right_of_way(junction, front, now, stopped)
-                if held is not None:
-                    if isinstance(held, float):
-                        desired_kmh = min(desired_kmh, held)       # rolling up to the line
-                    else:
-                        return held
-        elif junction is not None and settings.YIELD_AT_INTERSECTIONS and not junction["cleared"]:
-            now = time.monotonic()
-            held = self._right_of_way(junction, front, now, self.state.speed_mph < settings.STOPPED_SPEED_MPH)
+            if stop_sign and not junction["stop_done"]:
+                self.agent.set_target_speed(desired_kmh)
+                return None
+        if settings.YIELD_AT_INTERSECTIONS:
+            held = self._right_of_way(junction, front, now, stopped)
             if held is not None:
                 if isinstance(held, float):
-                    desired_kmh = min(desired_kmh, held)
+                    desired_kmh = min(desired_kmh, held)       # rolling up to the line
                 else:
                     return held
         self.agent.set_target_speed(desired_kmh)
         return None
 
     def _right_of_way(self, junction: Dict[str, Any], front: float, now: float, stopped: bool):
-        """Who may enter the intersection: None = we may (go on); a float = a speed
-        limit in km/h (rolling up to the line while giving way); a control = hold.
+        """Who may go at this intersection: None = we may (go on); a float = a speed
+        limit in km/h (rolling up to the line while giving way); a control = hold / brake.
 
-        * Cross traffic in or arriving at the intersection goes first.
-        * All-way / multi-way stops: whoever stopped first goes first; at the same
-          time, the car on the right goes first.  Cars standing at their own line
-          are watched: one starting to move off is given way to.
-        * With traffic lights (green): give way to vehicles still in the intersection
-          and, turning left, to oncoming traffic.
-        * Never enter unless there is room behind the intersection (do not block it).
-        * The decision is final only once the car has entered the intersection."""
+        Every nearby vehicle's possible paths through the intersection are compared
+        with ours; only one that would be where we are going, at about the same
+        time, matters (so turning right does not wait for traffic that never comes
+        near the right turn).  Whether we give way follows the rules of the road:
+
+        * Anyone already in the intersection, or about to run a stop sign / red light.
+        * At a stop sign (and turning right on red): everyone with right of way;
+          at an all-way stop, whoever stopped first (same time: the car on the right).
+        * Green light: only oncoming traffic when we turn left.
+        * No signs at all: traffic from the right; oncoming traffic when we turn left.
+        * Never enter without room behind the intersection (do not block it).
+
+        The check goes on inside the intersection: if a car pulls out anyway (as
+        CARLA's background cars do, they do not take turns with the AV) and we can
+        still stop before its path, we do."""
         to_entry = junction["entry_m"] - front
         speed = self.state.speed_mps
-        if to_entry > max(12.0, 3.0 + speed * speed / 6.0):     # early enough to stop gently at the line
-            return None
+        if to_entry > max(12.0, 3.0 + speed * speed / 6.0):
+            return None                 # early enough to stop at the line
+        cleared = junction["cleared"]   # the operator checked it and said go: only avoid a collision
+        ours = self._our_priority(junction, to_entry, now, stopped)
+        if ours == "red":
+            return None                 # red light: CARLA's BasicAgent holds the car at the line
         if stopped and to_entry <= 3.5 and junction.get("arrived_at") is None:
-            junction["arrived_at"] = junction.get("stopped_at") or now     # when we reached our line
-        reason, other = "cross traffic", None
-        if junction["signalized"]:
-            if self._light_is_green():
-                other = self._cross_traffic(junction, signalized=True)
-        else:
-            self._track_arrivals(junction, now)
-            other = self._cross_traffic(junction) or self._has_priority_over_us(junction)
-        if other is None and to_entry <= 3.5:
-            other = self._exit_blocker(junction)
-            reason = "space after intersection"
+            junction["arrived_at"] = junction.get("stopped_at") or junction.get("red_stop_at") or now
+        path = self._our_path(junction, front)
+        self._track_arrivals(junction, now)
+        other, conflict_m = self._must_give_way_to(junction, path, ours, collision_only=cleared)
+        reason = "cross traffic"
+        if other is None and to_entry > -0.5 and not cleared:      # not in the intersection yet
+            if ours in ("stop", "right_on_red"):
+                other, conflict_m = self._has_priority_over_us(junction, path), to_entry
+            if other is None and to_entry <= 3.5:
+                other, reason = self._exit_blocker(junction), "space after intersection"
         if other is None:
             junction["waiting_since"] = None
-            if to_entry <= 0.3:
-                junction["cleared"] = True         # in the intersection: no second-guessing mid-crossing
+            if ours == "right_on_red" and to_entry > -0.5 and self._red_turn is not junction:
+                self._red_turn = junction                      # all clear after a full stop: turn right on red
+                self._agent_ignores_lights(True)
+                print("[carla] Turning right on red after a full stop.")
             return None
+        if to_entry <= -0.5:
+            # Already in the intersection: stop short of the other car's path if we still can;
+            # if we cannot, keep going (stopping in its path would be worse).
+            if conflict_m - 1.0 < speed * speed / (2.0 * 5.0):
+                return None
+            self.state.waiting_for = reason
+            return carla.VehicleControl(throttle=0.0, brake=0.7 if speed > 2.0 else settings.SOFT_STOP_BRAKE)
         self.state.waiting_for = reason
-        if reason == "cross traffic":
+        if reason == "cross traffic" and stopped and not cleared:
             if junction["waiting_since"] is None:
                 junction["waiting_since"] = now
-                print("[carla] Yielding to {} at an intersection.".format(_describe(other)))
+                print("[carla] Giving way to {} at an intersection.".format(_describe(other)))
             elif now - junction["waiting_since"] > settings.YIELD_MAX_WAIT_SECONDS:
                 self._junction_asked = junction
                 self.soft_stop("Intersection blocked by {}".format(_describe(other)))
         if to_entry > 3.0:                             # not at the line yet: roll up to it, then hold
             return max(3.0, math.sqrt(2.0 * settings.STOP_SIGN_DECELERATION_MPS2 * (to_entry - 2.5)) * 3.6)
         return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
+
+    def _our_priority(self, junction: Dict[str, Any], to_entry: float, now: float, stopped: bool) -> str:
+        """Our standing at this intersection: "green" (light green or yellow), "red" (wait for
+        the light), "right_on_red" (after a full stop at red, turning right: lowest priority),
+        "stop" (stop sign: lowest priority), "priority" (through road, the others have stop
+        signs) or "uncontrolled" (no signs: yield to the right)."""
+        if not junction["signalized"]:
+            if junction["stop_m"] is not None and settings.OBEY_STOP_SIGNS:
+                return "stop"
+            return "priority" if junction["others_stop"] else "uncontrolled"
+        if self._red_turn is junction:
+            return "right_on_red"
+        state = self._our_light()
+        if state is None and to_entry > 0.0:             # not at it yet: look the light up for our lane
+            state = self._approach_control(junction["entry_wp"], junction)[1]
+        if state is not None:
+            junction["light"] = state                      # remembered while crossing (no longer "at" the light)
+        state = junction.get("light")
+        if state != "red":
+            junction["red_stop_at"] = None
+            return "green" if state is not None else "red"
+        if not (settings.RIGHT_ON_RED and junction["turn"] > 30.0 and stopped and to_entry <= 6.0):
+            junction["red_stop_at"] = None
+            return "red"
+        if junction.get("red_stop_at") is None:
+            junction["red_stop_at"] = now
+        return "right_on_red" if now - junction["red_stop_at"] >= settings.STOP_SIGN_WAIT_SECONDS else "red"
+
+    def _our_light(self) -> Optional[str]:
+        """Our traffic light while we are at it: "green" (also yellow), "red", or None."""
+        try:
+            if not self.ego.is_at_traffic_light():
+                return None
+            return "red" if self.ego.get_traffic_light_state() == carla.TrafficLightState.Red else "green"
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _agent_ignores_lights(self, ignore: bool) -> None:
+        try:
+            self.agent.ignore_traffic_lights(ignore)
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _our_path(self, junction: Dict[str, Any], front: float) -> List[Tuple[float, float, float]]:
+        """Our way through the intersection: points (x, y, metres ahead of our front bumper)."""
+        route = self.route
+        waypoints = route.waypoints
+        lane_width = waypoints[min(self.route_index, len(waypoints) - 1)].lane_width or 3.5
+        shift = self.lane_offset * lane_width
+        points = []
+        for index in range(max(0, route.index_at(min(front, junction["entry_m"] - 2.0)) - 1), len(waypoints)):
+            route_m = route.cumulative[index]
+            if route_m > junction["exit_m"] + 4.0:
+                break
+            transform = waypoints[index].transform
+            x, y = transform.location.x, transform.location.y
+            if shift:
+                right = transform.get_right_vector()
+                x, y = x + right.x * shift, y + right.y * shift
+            points.append((x, y, route_m - front))
+        return _densify(points)
+
+    def _vehicle_paths(self, vehicle, junction: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Where this vehicle may go through the intersection.  Each path: "points"
+        (x, y, metres from the vehicle's centre), "inside" (already in the intersection),
+        "entry_m" (metres to the intersection), "control" ("light", "stop" or None) with
+        "light" (its light state, if known), "from" ("left", "right", "oncoming", "same")."""
+        location = vehicle.get_location()
+        lane = self.map.get_waypoint(location)
+        if lane is None:
+            return []
+        velocity = vehicle.get_velocity()
+        speed = math.hypot(velocity.x, velocity.y)
+        heading = vehicle.get_transform().get_forward_vector()
+        if speed > 0.5:
+            heading = carla.Vector3D(velocity.x / speed, velocity.y / speed, 0.0)
+        if lane.is_junction:
+            try:
+                if lane.get_junction().id != junction["id"]:
+                    return []
+            except (AttributeError, RuntimeError):
+                return []
+            # In the intersection: follow its current motion (lanes overlap here).
+            points, yaw = [(location.x, location.y, 0.0)], math.atan2(heading.y, heading.x)
+            try:
+                yaw_rate = math.radians(vehicle.get_angular_velocity().z)
+            except (AttributeError, RuntimeError):
+                yaw_rate = 0.0
+            x, y, s, step = location.x, location.y, 0.0, 1.0
+            while speed > 0.3 and s < max(8.0, speed * 4.0):
+                yaw += yaw_rate * step / speed
+                x, y, s = x + math.cos(yaw) * step, y + math.sin(yaw) * step, s + step
+                points.append((x, y, s))
+            if speed <= 0.3:              # standing: its whole body
+                extent = vehicle.bounding_box.extent.x
+                points = [(location.x + heading.x * d, location.y + heading.y * d, 0.0) for d in (-extent, 0.0, extent)]
+            return [{"points": points, "inside": True, "entry_m": 0.0, "control": None, "light": None,
+                     "from": self._approach_side(math.degrees(math.atan2(heading.y, heading.x)), junction)}]
+        forward = lane.transform.get_forward_vector()
+        if heading.x * forward.x + heading.y * forward.y < 0.5:
+            return []                     # not driving along this lane (matched to the lane beside it)
+        limit = min(settings.YIELD_WATCH_METERS, 15.0 + speed * (settings.YIELD_GAP_SECONDS + 6.0))
+        prefix, s, step = [(location.x, location.y, 0.0)], 0.0, 2.0
+        while s < limit:
+            ahead = lane.next(step)
+            if not ahead:
+                return []
+            if any(w.is_junction for w in ahead):
+                if not any(w.is_junction and _junction_id(w) == junction["id"] for w in ahead):
+                    return []             # another intersection first
+                break
+            lane, s = ahead[0], s + step
+            prefix.append((lane.transform.location.x, lane.transform.location.y, s))
+        else:
+            return []                     # does not reach this intersection (soon)
+        control, light = self._approach_control(lane, junction)
+        side = self._approach_side(lane.transform.rotation.yaw, junction)
+        paths = []
+        for first in ahead[:4]:
+            points, through, d = list(prefix), first, s
+            for _ in range(60):
+                d += step
+                points.append((through.transform.location.x, through.transform.location.y, d))
+                if not through.is_junction:
+                    break
+                following = through.next(step)
+                if not following:
+                    break
+                through = following[0]
+            for _ in range(2):            # a little way into the road beyond
+                following = through.next(step)
+                if not following:
+                    break
+                through, d = following[0], d + step
+                points.append((through.transform.location.x, through.transform.location.y, d))
+            paths.append({"points": _densify(points), "inside": False, "entry_m": s, "control": control,
+                          "light": light, "from": side, "turn": _yaw_change(lane, through)})
+        # A turn signal tells which way it goes (CARLA's traffic sets them).
+        try:
+            lights = int(vehicle.get_light_state())
+            left = bool(lights & int(carla.VehicleLightState.LeftBlinker))
+            right = bool(lights & int(carla.VehicleLightState.RightBlinker))
+        except (AttributeError, RuntimeError, TypeError):
+            left = right = False
+        if left and right:
+            return paths                  # hazard lights: could go anywhere
+        if right:
+            signalled = [p for p in paths if p["turn"] > 30.0]
+        elif left:
+            signalled = [p for p in paths if p["turn"] < -30.0]
+        else:                             # no signal: straight on (it is watched once it is in the intersection)
+            signalled = [p for p in paths if abs(p["turn"]) <= 30.0]
+        return signalled or paths
+
+    def _approach_side(self, yaw: float, junction: Dict[str, Any]) -> str:
+        """Which way a vehicle heading ``yaw`` comes from, as seen from our approach."""
+        relative = (yaw - junction["entry_yaw"] + 180.0) % 360.0 - 180.0
+        if abs(relative) < 45.0:
+            return "same"
+        if abs(relative) > 135.0:
+            return "oncoming"
+        return "right" if relative < 0.0 else "left"      # CARLA: yaw grows clockwise
+
+    def _approach_control(self, entry, junction: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        """(the traffic control on the lane ``entry`` that leads into the intersection, its light state)."""
+        location, yaw = entry.transform.location, entry.transform.rotation.yaw
+        for light, stop, stop_yaw in self._light_stops:
+            if stop.distance(location) < 15.0 and abs((stop_yaw - yaw + 180.0) % 360.0 - 180.0) < 45.0:
+                try:
+                    return "light", "red" if light.get_state() == carla.TrafficLightState.Red else "green"
+                except (AttributeError, RuntimeError):
+                    return "light", None
+        if junction["signalized"]:
+            return "light", None
+        for zone, lane_yaw in self._stop_signs:
+            if zone.distance(location) < 25.0 and abs((lane_yaw - yaw + 180.0) % 360.0 - 180.0) < 45.0:
+                return "stop", None
+        return None, None
+
+    def _must_give_way_to(self, junction: Dict[str, Any], path, ours: str,
+                          collision_only: bool = False) -> Tuple[Optional[Any], float]:
+        """(a vehicle whose path we would cross too close to it in time and that has
+        right of way over us, metres from our front bumper to where we would meet it).
+        ``collision_only`` (the operator said go): any moving vehicle we would run into,
+        whatever the right of way; standing ones are left to the operator."""
+        if not path:
+            return None, 0.0
+        ego = self.ego.get_transform()
+        forward = ego.get_forward_vector()
+        center, radius = junction["center"], junction["radius"]
+        turning_left = junction["turn"] < -30.0
+        our_speed = self.state.speed_mps
+        our_top = max(our_speed, settings.INTERSECTION_APPROACH_SPEED_MPH / 2.237)
+        our_half = self.ego.bounding_box.extent
+        margin = settings.YIELD_GAP_SECONDS
+        for vehicle in self.world.get_actors().filter("vehicle.*"):
+            if vehicle.id == self.ego.id or vehicle.id in self.scene_actor_ids:
+                continue   # placed obstacles are handled by the obstacle check
+            location = vehicle.get_location()
+            if math.hypot(center.x - location.x, center.y - location.y) > radius + settings.YIELD_WATCH_METERS:
+                continue
+            if (location.x - ego.location.x) * forward.x + (location.y - ego.location.y) * forward.y < -3.0 and \
+                    math.hypot(center.x - location.x, center.y - location.y) > radius:
+                continue   # behind us
+            velocity = vehicle.get_velocity()
+            speed = math.hypot(velocity.x, velocity.y)
+            to_center = math.hypot(center.x - location.x, center.y - location.y)
+            if to_center > radius + 3.0 and (
+                    to_center - radius > 25.0 + speed * (settings.YIELD_GAP_SECONDS + 6.0) or
+                    (speed > 0.5 and velocity.x * (center.x - location.x) + velocity.y * (center.y - location.y) < 0)):
+                continue   # too far to matter yet / driving away from the intersection
+            extent = vehicle.bounding_box.extent
+            for other in self._vehicle_paths(vehicle, junction):
+                if other["from"] == "same" and not other["inside"]:
+                    continue                       # queue ahead of / behind us: BasicAgent keeps its distance
+                meet = _first_conflict(path, other["points"], our_half.y + extent.y + 0.5)
+                if meet is None:
+                    continue
+                our_in, our_out, their_in, their_out, merging = meet
+                if collision_only and speed <= 0.3:
+                    continue
+                if other["inside"] and speed <= 0.3:
+                    return vehicle, our_in         # standing in the intersection, in our way
+                if speed <= 0.3:
+                    continue                       # waiting at its line: arrival order decides
+                will_stop = False
+                if other["control"] == "stop" or (other["control"] == "light" and
+                                                  (other["light"] == "red" or
+                                                   (other["light"] is None and other["from"] in ("left", "right")))):
+                    # Can it still stop at its line?  Then it will (it has the stop sign / red light).
+                    # A car just moving off from its line has stopped already: it is going.
+                    will_stop = other["entry_m"] > 4.0 and speed * speed / (2.0 * 4.5) + 1.0 < other["entry_m"]
+                if will_stop and not other["inside"]:
+                    continue
+                if not other["inside"] and not collision_only and not self._gives_way_to(ours, other, turning_left):
+                    continue                       # we have right of way: it must wait for us
+                # Same place, same time?
+                t_in = _time_to_cover(our_in - 1.0, our_speed, 1.8, our_top)
+                t_out = _time_to_cover(our_out + 2.0 * our_half.x + 1.0, our_speed, 1.8, our_top)
+                top = speed if speed >= 3.0 else max(speed, 8.0)    # moving off: it speeds up
+                o_in = _time_to_cover(their_in - extent.x - 1.0, speed, 2.0, top)
+                o_out = _time_to_cover(their_out + extent.x + 1.0, speed, 2.0, top)
+                if merging:                        # into the same lane: keep a gap either way
+                    lag = margin + max(0.0, speed - our_top) / 2.0
+                    clash = t_in - margin < o_in < t_in + lag
+                else:
+                    clash = o_in < t_out + margin and o_out + margin > t_in
+                if clash:
+                    return vehicle, our_in
+        return None, 0.0
+
+    @staticmethod
+    def _gives_way_to(ours: str, other: Dict[str, Any], turning_left: bool) -> bool:
+        """The rules of the road: must we let this approaching (not yet stopping) vehicle go first?"""
+        side, control = other["from"], other["control"]
+        if ours in ("stop", "right_on_red"):
+            return True                            # everyone with right of way (stopped cars: arrival order)
+        if control in ("stop", "light") and ours in ("priority", "green", "uncontrolled"):
+            # It has a stop sign / red light but will not stop in time (or has just pulled out): let it.
+            if ours == "green" and side == "oncoming" and other["light"] != "red":
+                return turning_left                # oncoming on green: only when we turn left across it
+            return True
+        if ours == "green":
+            return turning_left and side == "oncoming"
+        if ours == "priority":
+            return turning_left and side == "oncoming"   # both on the through road
+        return side == "right" or (turning_left and side == "oncoming")   # no signs: yield to the right
 
     def _update_turn_signal(self) -> None:
         """Signal like a driver must: right while pulling over, the side of a lane
@@ -709,14 +1013,6 @@ class CarlaSimulation(Simulation):
             self.ego.set_light_state(carla.VehicleLightState(lights))
         except (AttributeError, RuntimeError, TypeError):
             pass
-
-    def _light_is_green(self) -> bool:
-        """Our traffic light (once at it) is green."""
-        try:
-            return self.ego.is_at_traffic_light() and \
-                self.ego.get_traffic_light_state() == carla.TrafficLightState.Green
-        except (AttributeError, RuntimeError):
-            return False
 
     def _waiting_at_line(self, vehicle, junction: Dict[str, Any]) -> bool:
         """Is this vehicle standing in a lane that runs into this intersection, at its line
@@ -755,22 +1051,28 @@ class CarlaSimulation(Simulation):
             if vehicle_id not in waiting:
                 del arrivals[vehicle_id]                   # it has gone (or moved off: then it is cross traffic)
 
-    def _has_priority_over_us(self, junction: Dict[str, Any]) -> Optional[Any]:
-        """At a stop: a car that stopped at its line before us, or at the same time on our right."""
+    def _has_priority_over_us(self, junction: Dict[str, Any], path) -> Optional[Any]:
+        """At a stop: a car that stopped at its line before us, or at the same time on our
+        right, and that may go where we are going (a car whose every way misses ours,
+        e.g. one on our right going straight while we turn right, can go at the same time)."""
         ours = junction.get("arrived_at")
         if ours is None:
             return None                                    # we are not stopped at the line
         ego = self.ego.get_transform()
         right = ego.get_right_vector()
-        for vehicle_id, arrived in junction.get("arrivals", {}).items():
+        for vehicle_id, arrived in sorted(junction.get("arrivals", {}).items(), key=lambda item: item[1]):
             vehicle = self.world.get_actor(vehicle_id)
             if vehicle is None:
                 continue
-            if arrived < ours - 0.5:
-                return vehicle                             # it was there first
             offset = vehicle.get_location() - ego.location
-            if abs(arrived - ours) <= 1.0 and offset.x * right.x + offset.y * right.y > 0:
-                return vehicle                             # same time, on our right
+            first = arrived < ours - 0.5
+            tie_on_right = abs(arrived - ours) <= 1.0 and offset.x * right.x + offset.y * right.y > 0
+            if not (first or tie_on_right):
+                continue
+            width = self.ego.bounding_box.extent.y + vehicle.bounding_box.extent.y + 0.5
+            if any(_first_conflict(path, other["points"], width) is not None
+                   for other in self._vehicle_paths(vehicle, junction)) or not path:
+                return vehicle
         return None
 
     def _exit_blocker(self, junction: Dict[str, Any]) -> Optional[Any]:
@@ -789,77 +1091,6 @@ class CarlaSimulation(Simulation):
                     abs(lateral - self.lane_offset * lane_width) < 1.6:
                 return vehicle
         return None
-
-    def _cross_traffic(self, junction: Dict[str, Any], signalized: bool = False) -> Optional[Any]:
-        """A vehicle the AV must give way to at this intersection, or None.
-
-        Uses the road network: a vehicle counts if it is inside this very
-        intersection (moving, or standing on or next to our path), or if its lane
-        runs into this intersection and it will be there within YIELD_GAP_SECONDS.
-        Parked cars, cars waiting at their own line, and cars on roads that do not
-        lead in do not count."""
-        ego = self.ego.get_transform()
-        forward = ego.get_forward_vector()
-        center, radius = junction["center"], junction["radius"]
-        turning_left = junction["turn"] < -30.0
-        for vehicle in self.world.get_actors().filter("vehicle.*"):
-            if vehicle.id == self.ego.id or vehicle.id in self.scene_actor_ids:
-                continue   # placed obstacles are handled by the obstacle check
-            location = vehicle.get_location()
-            to_center = math.hypot(center.x - location.x, center.y - location.y)
-            if to_center > radius + settings.YIELD_WATCH_METERS:
-                continue
-            if (location.x - ego.location.x) * forward.x + (location.y - ego.location.y) * forward.y < -1.0:
-                continue   # behind us
-            velocity = vehicle.get_velocity()
-            speed = math.hypot(velocity.x, velocity.y)
-            along = velocity.x * forward.x + velocity.y * forward.y
-            if speed > 0.5 and along > 0.7 * speed:
-                continue   # going our way (ahead of us): BasicAgent keeps its distance
-            oncoming = speed > 0.5 and along < -0.7 * speed
-            if oncoming and not turning_left:
-                continue   # oncoming: only in our way when we turn left across its lane
-            if junction.get("id") is not None:
-                if self._conflicts_in_junction(vehicle, location, speed, junction,
-                                               arriving_counts=not signalized or oncoming):
-                    return vehicle
-                continue
-            if signalized and not oncoming and to_center > radius:
-                continue   # cross traffic has a red light
-            if to_center <= radius:
-                return vehicle             # in the intersection
-            if speed < 1.0:
-                continue                   # waiting at its own stop line / light
-            closing = (velocity.x * (center.x - location.x) + velocity.y * (center.y - location.y)) / max(to_center, 0.1)
-            if closing > 0.5 * speed and (to_center - radius) / closing < settings.YIELD_GAP_SECONDS:
-                return vehicle             # arriving before we could be across
-        return None
-
-    def _conflicts_in_junction(self, vehicle, location, speed: float, junction: Dict[str, Any],
-                               arriving_counts: bool = True) -> bool:
-        """Road-network test for ``_cross_traffic`` (see there)."""
-        lane = self.map.get_waypoint(location)
-        if lane is None:
-            return False
-        if lane.is_junction and lane.get_junction().id == junction["id"]:
-            if speed > 0.5:
-                return True                # crossing right now
-            # Standing in the intersection: only in the way if on or next to our path through it.
-            path_m, lateral, _ = self.route.project(location.x, location.y)
-            return junction["entry_m"] - 2.0 <= path_m <= junction["exit_m"] + 2.0 and abs(lateral) < 3.5
-        if speed < 0.3 or not arriving_counts:
-            return False                   # standing (at its line / light, or parked): see arrival order
-        velocity, along = vehicle.get_velocity(), lane.transform.get_forward_vector()
-        if velocity.x * along.x + velocity.y * along.y < 0.5 * speed:
-            return False                   # not driving along that lane (matched to the lane beside it)
-        # Also a car just moving off from its line (slow, but right at the entry).
-        reach = max(8.0, min(settings.YIELD_WATCH_METERS, speed * settings.YIELD_GAP_SECONDS))
-        distance = 2.0
-        while distance <= reach:           # does its lane run into this intersection that soon?
-            if any(ahead.is_junction and ahead.get_junction().id == junction["id"] for ahead in lane.next(distance)):
-                return True
-            distance += 2.0
-        return False
 
     # =====================================================================
     # Commands
@@ -2219,6 +2450,73 @@ def _walk_towards(walker, location, speed: float) -> bool:
 def _yaw_change(a, b) -> float:
     """Signed heading change from waypoint a to b in degrees (positive = right turn)."""
     return (b.transform.rotation.yaw - a.transform.rotation.yaw + 180.0) % 360.0 - 180.0
+
+
+def _junction_id(waypoint) -> Optional[int]:
+    try:
+        return waypoint.get_junction().id
+    except (AttributeError, RuntimeError):
+        return None
+
+
+def _densify(points: List[Tuple[float, float, float]], step: float = 1.0) -> List[Tuple[float, float, float]]:
+    """Fill in points (x, y, distance) so that they are at most ``step`` metres apart."""
+    out = points[:1]
+    for (x1, y1, s1), (x2, y2, s2) in zip(points, points[1:]):
+        gap = math.hypot(x2 - x1, y2 - y1)
+        pieces = int(gap / step)
+        for k in range(1, pieces + 1):
+            t = k / (pieces + 1.0)
+            out.append((x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, s1 + (s2 - s1) * t))
+        out.append((x2, y2, s2))
+    return out
+
+
+def _first_conflict(ours, theirs, width: float):
+    """Where two paths (lists of (x, y, distance)) come closer than ``width``:
+    (our first and last distance there, theirs, merging into the same lane?) or None."""
+    if not ours or not theirs:
+        return None
+    xs, ys = [p[0] for p in ours], [p[1] for p in ours]
+    low_x, high_x, low_y, high_y = min(xs) - width, max(xs) + width, min(ys) - width, max(ys) + width
+    near = [p for p in theirs if low_x <= p[0] <= high_x and low_y <= p[1] <= high_y]
+    if not near:
+        return None
+    limit = width * width
+    our_in = our_out = their_in = their_out = None
+    for ox, oy, os_ in ours:
+        for tx, ty, ts in near:
+            if (ox - tx) ** 2 + (oy - ty) ** 2 < limit:
+                if our_in is None:
+                    our_in = os_
+                our_out = os_
+                their_in = ts if their_in is None else min(their_in, ts)
+                their_out = ts if their_out is None else max(their_out, ts)
+    if our_in is None:
+        return None
+    # Merging: at the end both paths run the same way, side by side.
+    a, b = ours[-1], ours[max(0, len(ours) - 4)]
+    c = min(theirs, key=lambda p: (p[0] - a[0]) ** 2 + (p[1] - a[1]) ** 2)
+    k = theirs.index(c)
+    d = theirs[max(0, k - 3)]
+    ux, uy, vx, vy = a[0] - b[0], a[1] - b[1], c[0] - d[0], c[1] - d[1]
+    norm = math.hypot(ux, uy) * math.hypot(vx, vy)
+    merging = norm > 0 and (ux * vx + uy * vy) / norm > 0.8 and (c[0] - a[0]) ** 2 + (c[1] - a[1]) ** 2 < limit
+    return our_in, our_out, their_in, their_out, merging
+
+
+def _time_to_cover(distance: float, speed: float, accel: float, top: float) -> float:
+    """Seconds to drive ``distance`` metres from ``speed``, speeding up at ``accel`` to ``top``."""
+    if distance <= 0.0:
+        return 0.0
+    speed, top = max(0.0, speed), max(top, speed, 0.1)
+    if speed >= top:
+        return distance / top
+    ramp_t = (top - speed) / accel
+    ramp_d = (speed + top) / 2.0 * ramp_t
+    if distance <= ramp_d:
+        return (-speed + math.sqrt(speed * speed + 2.0 * accel * distance)) / accel
+    return ramp_t + (distance - ramp_d) / top
 
 
 def _describe(actor) -> str:

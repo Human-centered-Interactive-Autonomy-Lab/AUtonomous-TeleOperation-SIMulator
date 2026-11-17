@@ -276,15 +276,16 @@ DETOUR_CHECK_METERS: float = 80.0
 # e.g. for a study in which the AV breaks a rule on purpose.
 OBEY_SPEED_LIMITS: bool = True             # never faster than the road's limit
 OBEY_STOP_SIGNS: bool = True               # full stop at the line, then wait
-YIELD_AT_INTERSECTIONS: bool = True        # give way to cross traffic at intersections without lights
+YIELD_AT_INTERSECTIONS: bool = True        # right of way at intersections (who goes first)
 
 STOP_SIGN_WAIT_SECONDS: float = 2.0        # standing still at the stop line before going on
 STOP_SIGN_DECELERATION_MPS2: float = 2.0   # gentle approach to the stop line
 STOP_LINE_SETBACK_METERS: float = 1.5      # stop this far before the intersection begins
 INTERSECTION_LOOKAHEAD_METERS: float = 35.0
 INTERSECTION_APPROACH_SPEED_MPH: float = 12.0   # into intersections without lights
-YIELD_GAP_SECONDS: float = 4.0             # cross traffic arriving sooner than this: wait
-YIELD_WATCH_METERS: float = 35.0           # look this far up the other roads for cross traffic
+YIELD_GAP_SECONDS: float = 2.0             # time to spare between us and another car where our paths cross
+YIELD_WATCH_METERS: float = 90.0           # look this far up the other roads (fast cross traffic)
+RIGHT_ON_RED: bool = True                  # after a full stop, turn right on red when the way is clear
 YIELD_MAX_WAIT_SECONDS: float = 15.0       # then stop and ask the operator (Resume AV crosses)
 
 # Lane changes (pulling over, passing, operator requests) are made only when
