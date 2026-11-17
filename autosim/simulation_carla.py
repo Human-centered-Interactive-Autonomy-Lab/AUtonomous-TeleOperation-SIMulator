@@ -197,7 +197,9 @@ class CarlaSimulation(Simulation):
         self._npc_watch: Dict[int, Dict[str, Any]] = {}  # actor id -> where/when it last moved, nudges tried
         self._npc_held: Dict[int, Tuple[Any, str, float]] = {}  # background cars waiting for the AV's turn
         self._npc_held_enough: set = set()          # held the longest allowed at this intersection
-        self._front_hit: Tuple[float, float] = (0.0, 99.0)   # front obstacle sensors: (when, metres ahead)
+        self._referee_for: Optional[Dict[str, Any]] = None   # the intersection where it is the AV's turn
+        self._turnaround: Optional[Dict[str, Any]] = None    # a three-point turn in progress (reroute)
+        self._front_hit: Tuple[float, float, bool] = (0.0, 99.0, False)   # front sensors: (when, metres, vehicle?)
         self._offset_changes: List[Tuple[float, int]] = []   # (route_m, lanes): where the plan's lane offset changes
         self._pass_from_lane: Optional[int] = None  # passing a parked car: the lane it is in
         self._curb_offset: Optional[float] = None   # pulling over: how far right of the lane centre the curb stop is
@@ -374,6 +376,11 @@ class CarlaSimulation(Simulation):
         speed_mph = self.state.speed_mph
         stopped = speed_mph < settings.STOPPED_SPEED_MPH
 
+        if self._turnaround is not None and mode != DrivingMode.AUTONOMOUS:
+            self._turnaround = None                  # the operator stopped / took over: turn-around abandoned
+        if self._turnaround is not None:
+            return self._turn_around_step()
+
         if mode == DrivingMode.MANUAL:
             throttle, steer, brake, reverse = self.manual_input
             return carla.VehicleControl(throttle=throttle, steer=steer, brake=brake, reverse=reverse)
@@ -462,14 +469,17 @@ class CarlaSimulation(Simulation):
             self.lane_return_at_m = None
             self.lane_target = 0     # back to the original lane (when safe)
         self._update_lane()
-        if self._pass_from_lane is not None and self._overtaking is not None and self._overtaking < 0:
+        if self._pass_from_lane is not None and self._overtaking is not None:
             if self.lane_offset == self._pass_from_lane:
-                # Still behind the parked car (the next lane is busy): stop short of it, wait for a gap.
-                car = next((c for c in self._parked_cars if c.id == self._overtaking), None)
+                # Still behind what we are passing (the next lane is busy): stop short of it, wait for a gap.
+                car = (next((c for c in self._parked_cars if c.id == self._overtaking), None) if self._overtaking < 0
+                       else self.world.get_actor(self._overtaking))
                 if car is not None:
                     spot = car.get_location()
+                    box = getattr(car, "bounding_box", None)
                     gap = self.route.project(spot.x, spot.y, near_index=self.route_index)[0] - \
-                        self.state.route_traveled_m - self.ego.bounding_box.extent.x - car.bounding_box.extent.x
+                        self.state.route_traveled_m - self.ego.bounding_box.extent.x - \
+                        (box.extent.x if box is not None else 0.5)
                     if gap < self.state.speed_mps ** 2 / (2.0 * 3.0) + 3.0:
                         self.state.waiting_for = "lane change"
                         return carla.VehicleControl(throttle=0.0, brake=settings.SOFT_STOP_BRAKE)
@@ -497,6 +507,8 @@ class CarlaSimulation(Simulation):
             blocking, walker_in_path = self._scan_path()
             if blocking is not None and blocking.id < 0 and self._pass_parked_car(blocking):
                 blocking = None               # a parked car in our lane: pass it in the next lane
+            if blocking is not None and blocking.id == self._overtaking and self._pass_from_lane is not None:
+                blocking = None               # already on our way around it (waiting for a gap)
             if blocking is not None:
                 name = self.actor_names.get(blocking.id) or _describe(blocking)
                 self.soft_stop("Obstacle detected ahead: {}".format(name))
@@ -509,8 +521,8 @@ class CarlaSimulation(Simulation):
         if held is not None:
             self._blocked_since = None
             return held
-        solid = self._solid_ahead()
-        if solid is not None and self.state.speed_mps > 0.5 and solid < self.state.speed_mps ** 2 / (2.0 * 6.0) + 0.8:
+        solid = self._solid_ahead(vehicles=False)
+        if solid is not None and self.state.speed_mps > 0.5 and solid < self.state.speed_mps ** 2 / (2.0 * 7.0) + 0.5:
             self.state.waiting_for = "obstacle"
             return carla.VehicleControl(throttle=0.0, brake=1.0)   # about to hit something: brake now
         control = self.agent.run_step()
@@ -1135,16 +1147,21 @@ class CarlaSimulation(Simulation):
             return
         to_entry, speed = junction["entry_m"] - front, self.state.speed_mps
         inside = to_entry <= 0.0
+        yielding = self.state.waiting_for in ("cross traffic", "space after intersection", "stop sign", "red light")
         if self.mode in (DrivingMode.AUTONOMOUS, DrivingMode.PULLING_OVER):
-            our_turn = inside or (not self.state.waiting_for and to_entry < max(6.0, speed * 2.5) and
+            our_turn = inside or (not yielding and to_entry < max(6.0, speed * 2.5) and
                                   (junction["stop_m"] is None or junction["stop_done"] or junction["signalized"]))
+            if self._referee_for is junction and not yielding:
+                our_turn = True                       # once it is our turn, it stays ours until we are through
         elif self.mode == DrivingMode.MANUAL:
             our_turn = inside or (speed > 1.0 and to_entry < max(5.0, speed * 2.0))
         else:
             our_turn = False
         if not our_turn:
+            self._referee_for = None
             self._release_npcs()
             return
+        self._referee_for = junction
         path = self._our_path(junction, front)
         keep, now = set(), time.monotonic()
         half = self.ego.bounding_box.extent
@@ -1161,23 +1178,30 @@ class CarlaSimulation(Simulation):
             if car.id in self._npc_held_enough:
                 continue
             for other in paths:
-                if other["inside"] or other["from"] == "same":
-                    continue
+                if other["inside"] or other["from"] == "same" or other["entry_m"] > 30.0:
+                    continue                          # (far away: dealt with once it gets near)
                 meet = _first_conflict(path, other["points"], half.y + car.bounding_box.extent.y + 0.5)
                 if meet is None or meet[1] + 2.0 * half.x < 0.0:
                     continue                          # never meets us / we are past that point already
-                can_stop = car_speed * car_speed / (2.0 * 3.5) + 1.5 < other["entry_m"]
+                # Like a driver who sees the AV take its turn: ease off and stop at the line.
+                can_stop = car_speed < 0.5 or car_speed * car_speed / (2.0 * 2.5) + 2.0 < other["entry_m"]
                 if held or can_stop:
                     keep.add(car.id)
-                    if not held:
-                        self._hold_npc(car, now)
+                    self._hold_npc(car, now, other["entry_m"])
                     break
         self._release_npcs(keep, now)
 
-    def _hold_npc(self, car, now: float) -> None:
+    def _hold_npc(self, car, now: float, to_line: float = 0.0) -> None:
+        """Slow a background car smoothly to a stop at its line (about 2.5 m/s^2)."""
         method = "speed"
+        kmh = 3.6 * math.sqrt(2.0 * 2.5 * max(0.0, to_line - 4.5))   # (its centre stops ~4.5 m before)
+        try:                                         # never faster than it would drive anyway
+            kmh = min(kmh, car.get_speed_limit() * (1.0 - settings.NPC_SPEED_BELOW_LIMIT_PERCENT / 100.0))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        previous = self._npc_held.get(car.id)
         try:
-            self._traffic_manager.set_desired_speed(car, 0.0)
+            self._traffic_manager.set_desired_speed(car, kmh if kmh > 5.0 else 0.0)
         except (AttributeError, RuntimeError):
             method = "brake"                         # older Traffic Manager: take the wheel briefly
             try:
@@ -1185,7 +1209,7 @@ class CarlaSimulation(Simulation):
                 car.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
             except RuntimeError:
                 return
-        self._npc_held[car.id] = (car, method, now)
+        self._npc_held[car.id] = (car, method, previous[2] if previous else now)
 
     def _release_npcs(self, keep=(), now: Optional[float] = None) -> None:
         """Let the held background cars go (all but ``keep``; never held for too long)."""
@@ -1636,35 +1660,189 @@ class CarlaSimulation(Simulation):
         return True
 
     def reroute(self, alternate_index: int) -> bool:
-        if self.ego is None or self.scene is None:
+        """Take a detour.  ``alternate_index``: the scene's alternate route (or, without
+        any, 0 = next left turn, 1 = next right turn); -1 = turn around.
+
+        A detour never leads through what the car stopped for: it takes the requested
+        turn (else the other, else straight on) if the way there is clear; if it is not,
+        it passes the blockage in a free lane going our way and then turns; if that is
+        not possible either (the road is closed), it turns around (a three-point turn,
+        when the road is clear) and takes the turn on the way back."""
+        if self.ego is None:
             return False
-        routes = self.scene.alternate_routes
-        spec = routes[alternate_index] if alternate_index < len(routes) else RouteSpec({})
-        if alternate_index >= max(1, len(routes)):
+        routes = self.scene.alternate_routes if self.scene is not None else []
+        if alternate_index >= max(2, len(routes)):
             return False
-        # A detour must not lead through what the car stopped for: try the requested
-        # turn, then the other one, then straight on; refuse if all are blocked.
+        spec = routes[alternate_index] if 0 <= alternate_index < len(routes) else RouteSpec({})
         preferred = "left" if alternate_index % 2 == 0 else "right"
+        if alternate_index < 0:
+            return self._start_turn_around(spec, "left")
         start = self._ego_waypoint()
-        blocker = None
         for turn in (preferred, "right" if preferred == "left" else "left", ""):
             waypoints = self._plan_route(start, spec, turn_at_first_junction=turn)
             blocker = self._obstacle_along(waypoints, settings.DETOUR_CHECK_METERS)
-            if blocker is None:
-                break
-        if blocker is not None:
-            name = self.actor_names.get(blocker.id) or _describe(blocker)
-            print("[carla] No detour around the {} from here.".format(name))
-            self.soft_stop("No detour around the {} from here: turn around with Manual Control".format(name))
-            return False
-        if turn != preferred:
-            print("[carla] Detour: the {} turn is blocked; going {} instead.".format(preferred, turn or "straight on"))
+            passing = None if blocker is None else self._free_lane_around(waypoints, blocker)
+            if blocker is not None and passing is None:
+                continue
+            if turn != preferred:
+                print("[carla] Detour: the {} turn is blocked; going {} instead.".format(preferred, turn or "straight on"))
+            self._set_route(waypoints)
+            if passing is not None:
+                print("[carla] Detour: passing the {} in the {} lane first.".format(
+                    self.actor_names.get(blocker.id) or _describe(blocker), "left" if passing < 0 else "right"))
+                self._overtaking, self._pass_from_lane = blocker.id, 0
+                self.lane_target = passing
+                self._update_lane()
+            return True
+        print("[carla] The road ahead is closed; turning around for the detour.")
+        return self._start_turn_around(spec, preferred)
+
+    def _set_route(self, waypoints: List[Any]) -> None:
         self.route = _Route(waypoints, self.state.route_traveled_m)
         self._extend_route_past_junction()
         self.route_index = 0
         self.lane_return_at_m = None
         self._follow_route_lane()
+
+    def _free_lane_around(self, waypoints: List[Any], blocker) -> Optional[int]:
+        """A lane going our way (left first) in which the stretch past ``blocker`` is clear, or None."""
+        location = blocker.get_location()
+        path = _Route(waypoints)
+        blocker_m = path.project(location.x, location.y)[0]
+        stretch = [w for w, m in zip(waypoints, path.cumulative) if m <= blocker_m + 15.0]
+        for lanes in (-1, 1, -2, 2):
+            shifted = [_lanes_over(w, lanes, driving_only=True) for w in stretch]
+            if not shifted or any(w is None or (w.lane_id > 0) != (stretch[0].lane_id > 0) for w in shifted):
+                continue
+            if self._obstacle_along(shifted, blocker_m + 15.0) is None:
+                return lanes
+        return None
+
+    # --- turning around (three-point turn) ----------------------------------
+
+    def _start_turn_around(self, spec: RouteSpec, turn: str) -> bool:
+        here = self._ego_waypoint()
+        if here is None:
+            return False
+        ours, lanes, far = here.lane_id > 0, -1, None
+        while lanes >= -8:                           # lanes to our left, up to the far side of the road
+            lane = _lanes_over(here, lanes, driving_only=True)
+            if lane is None:
+                break
+            if (lane.lane_id > 0) != ours:
+                far = (lanes, lane)
+            lanes -= 1
+        if far is None:
+            print("[carla] No lane in the other direction here: cannot turn around.")
+            self.soft_stop("Cannot turn around here (one-way road): use Manual Control")
+            return False
+        _, near_right = _rightmost_lane(here)
+        right_lane = _lanes_over(here, near_right, driving_only=True) or here
+        left_edge = far[0] * far[1].lane_width - far[1].lane_width / 2.0      # lateral, from our lane's centre
+        right_edge = near_right * here.lane_width + right_lane.lane_width / 2.0
+        if right_edge - left_edge < 6.0:
+            self.soft_stop("Road too narrow to turn around here: use Manual Control")
+            return False
+        transform = here.transform
+        self._turnaround = {"origin": transform.location, "right": transform.get_right_vector(),
+                            "left_edge": left_edge, "right_edge": right_edge, "phase": "wait",
+                            "next": "forward", "turned": 0.0, "yaw": self.ego.get_transform().rotation.yaw,
+                            "since": time.monotonic(), "moves": 0, "spec": spec, "turn": turn}
+        self.mode = DrivingMode.AUTONOMOUS
+        print("[carla] Turning around (road {:.1f} m wide).".format(right_edge - left_edge))
         return True
+
+    def _turn_around_step(self):
+        """One control step of the three-point turn: forward with full left lock, back
+        with full right lock, ... until facing the other way, keeping 0.6 m from both
+        road edges; only when nothing is coming."""
+        turn = self._turnaround
+        now = time.monotonic()
+        transform = self.ego.get_transform()
+        yaw = transform.rotation.yaw
+        turn["turned"] += -((yaw - turn["yaw"] + 180.0) % 360.0 - 180.0)   # left turns lower CARLA's yaw
+        turn["yaw"] = yaw
+        speed = self.state.speed_mps
+        self.state.waiting_for = "turning around"
+        brake = carla.VehicleControl(throttle=0.0, brake=1.0)
+        if turn["turned"] >= 150.0:
+            return self._finish_turn_around()
+        if now - turn["since"] > 60.0 or turn["moves"] > 7:
+            self._turnaround = None
+            self.soft_stop("Could not turn around here: use Manual Control")
+            return brake
+        traffic = self._turn_around_traffic(waiting=turn["phase"] == "wait")
+        if traffic is not None:
+            self.state.waiting_for = "gap to turn around"
+            return brake
+        if turn["phase"] == "wait":
+            turn["phase"] = "forward"
+        # Where the corners are, across the road (from our lane's centre, + = right).
+        forward, right, extent = transform.get_forward_vector(), transform.get_right_vector(), self.ego.bounding_box.extent
+        origin, across = turn["origin"], turn["right"]
+
+        def lateral(along, side):
+            x = transform.location.x + forward.x * along + right.x * side - origin.x
+            y = transform.location.y + forward.y * along + right.y * side - origin.y
+            return x * across.x + y * across.y
+        front = [lateral(extent.x, -extent.y), lateral(extent.x, extent.y)]
+        rear = [lateral(-extent.x, -extent.y), lateral(-extent.x, extent.y)]
+        if turn["phase"] == "stop":
+            if speed > 0.1:
+                return brake
+            turn["phase"], turn["moves"] = turn["next"], turn["moves"] + 1
+        if turn["phase"] == "forward":
+            solid = self._solid_ahead()
+            if min(front) < turn["left_edge"] + 0.6 or (solid is not None and solid < 1.2):
+                turn["phase"], turn["next"] = "stop", "reverse"
+                return brake
+            return carla.VehicleControl(throttle=0.35 if speed < 1.5 else 0.0, steer=-1.0, brake=0.0)
+        if max(rear) > turn["right_edge"] - 0.6 or self._something_behind():
+            turn["phase"], turn["next"] = "stop", "forward"
+            return brake
+        return carla.VehicleControl(throttle=0.35 if speed < 1.2 else 0.0, steer=1.0, brake=0.0, reverse=True)
+
+    def _turn_around_traffic(self, waiting: bool) -> Optional[Any]:
+        """A vehicle or pedestrian that rules out (or pauses) turning around now."""
+        ego = self.ego.get_location()
+        for vehicle in self.world.get_actors().filter("vehicle.*"):
+            if vehicle.id == self.ego.id:
+                continue
+            location = vehicle.get_location()
+            distance = location.distance(ego)
+            velocity = vehicle.get_velocity()
+            speed = math.hypot(velocity.x, velocity.y)
+            closing = speed > 0.5 and (velocity.x * (ego.x - location.x) + velocity.y * (ego.y - location.y)) > 0
+            if (closing and distance < (50.0 if waiting else 15.0)) or (speed > 0.5 and distance < 6.0):
+                return vehicle                       # coming toward us: let it pass first
+        for walker in self.world.get_actors().filter("walker.pedestrian.*"):
+            if walker.get_location().distance(ego) < 6.0 and walker.id not in self._passenger_ids():
+                return walker
+        return None
+
+    def _something_behind(self) -> bool:
+        """A vehicle, obstacle or parked car within about a metre of our rear bumper."""
+        transform = self.ego.get_transform()
+        forward, extent = transform.get_forward_vector(), self.ego.bounding_box.extent
+        rear = carla.Location(transform.location.x - forward.x * (extent.x + 1.0),
+                              transform.location.y - forward.y * (extent.x + 1.0), transform.location.z)
+        others = [a for a in self.world.get_actors().filter("vehicle.*") if a.id != self.ego.id]
+        others += [a for a in self.spawned if a.id in self.scene_actor_ids and not a.type_id.startswith("walker.")]
+        others += self._parked_near(rear, 10.0)
+        for actor in others:
+            box = getattr(actor, "bounding_box", None)
+            reach = (max(box.extent.x, box.extent.y) if box is not None else 0.5) + 1.2
+            if actor.get_location().distance(rear) < reach:
+                return True
+        return False
+
+    def _finish_turn_around(self):
+        turn, self._turnaround = self._turnaround, None
+        start = self._ego_waypoint()
+        waypoints = self._plan_route(start, turn["spec"], turn_at_first_junction=turn["turn"])
+        self._set_route(waypoints)
+        print("[carla] Turned around; following the detour.")
+        return self.agent.run_step()
 
     def _obstacle_along(self, waypoints: List[Any], reach: float) -> Optional[Any]:
         """The first placed prop or vehicle within ``reach`` metres along these waypoints, or None."""
@@ -2531,12 +2709,20 @@ class CarlaSimulation(Simulation):
                 return                       # pedestrians: handled by the path check (they move away)
         except (AttributeError, RuntimeError):
             pass
-        self._front_hit = (time.monotonic(), float(event.distance))
+        try:
+            vehicle = other is not None and other.type_id.startswith("vehicle.")
+        except (AttributeError, RuntimeError):
+            vehicle = False
+        self._front_hit = (time.monotonic(), float(event.distance), vehicle)
 
-    def _solid_ahead(self) -> Optional[float]:
-        """Metres to something solid right ahead (front obstacle sensors, last 0.3 s), or None."""
-        when, distance = self._front_hit
-        return distance if time.monotonic() - when < 0.3 else None
+    def _solid_ahead(self, vehicles: bool = True) -> Optional[float]:
+        """Metres to something solid right ahead (front obstacle sensors, last 0.3 s), or None.
+        ``vehicles=False``: only things that are not vehicles (traffic is BasicAgent's job:
+        braking hard for every car ahead would brake-check the traffic behind)."""
+        when, distance, vehicle = self._front_hit
+        if time.monotonic() - when >= 0.3 or (vehicle and not vehicles):
+            return None
+        return distance
 
     def _on_collision(self, event) -> None:
         """Runs on CARLA's thread.  A passenger brushing the car while getting out or in is not a collision."""

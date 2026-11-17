@@ -315,7 +315,7 @@ CURB_CLEAR_BEFORE_INTERSECTION_METERS: float = 10.0   # no stopping this close b
 CURB_CLEAR_AFTER_INTERSECTION_METERS: float = 6.0     # ... or after one (~20 ft)
 
 # Background traffic (CARLA's Traffic Manager and walker AI).
-NPC_FOLLOW_DISTANCE_METERS: float = 2.5       # gap background cars keep to the car ahead
+NPC_FOLLOW_DISTANCE_METERS: float = 4.0       # gap background cars keep to the car ahead
 NPC_SPEED_BELOW_LIMIT_PERCENT: float = 20.0   # how far below the speed limit they drive
 NPC_YIELD_TO_AV: bool = True                 # background cars wait at intersections when it is the AV's turn
 NPC_YIELD_MAX_SECONDS: float = 20.0          # never held longer than this
