@@ -169,7 +169,8 @@ class Simulation:
         raise NotImplementedError
 
     def reroute(self, alternate_index: int) -> bool:
-        """Follow the scene's alternate route (0-based).  False if it does not exist."""
+        """Detour: the scene's alternate route (0-based; without any, 0 = next left, 1 = next
+        right turn); -1 = turn around.  False if it is not possible."""
         raise NotImplementedError
 
     def start_next_trip(self, pickup_after_m: float, trip_length_m: float) -> bool:

@@ -45,6 +45,10 @@ class RecordingCar(OfflineSimulation):
         self.received.append("lane_" + direction)
         return True
 
+    def reroute(self, alternate_index):
+        self.received.append("reroute_{}".format(alternate_index))
+        return True
+
 
 @pytest.fixture
 def clock(monkeypatch):
@@ -117,3 +121,16 @@ def test_estop_after_pull_over_is_not_lost(clock):
     press(session, "emergency_stop")
     frames(session, clock, 0.5)
     assert car.received == ["pull_over", "estop"]
+
+
+def test_reroute_menu_always_offers_detours_and_turning_around(clock):
+    session, car, _ = make(clock)
+    session.scenario.scene.alternate_routes = []
+    assert actions.find_action("reroute_menu").handler(session) == "reroute"
+    options = actions.DYNAMIC_DIALOG_OPTIONS["reroute"](session)
+    labels = [option.label for option in options]
+    assert labels == ["Detour via next left turn", "Detour via next right turn", "Turn around"], labels
+    options[1].handler(session)
+    options[2].handler(session)
+    frames(session, clock, 0.2)
+    assert car.received == ["reroute_1", "resume", "reroute_-1", "resume"], car.received

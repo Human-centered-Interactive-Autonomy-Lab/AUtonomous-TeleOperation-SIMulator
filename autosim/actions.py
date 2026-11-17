@@ -188,14 +188,16 @@ def _report_hazard(session) -> None:
 
 def _reroute_menu(session) -> Optional[str]:
     session.record_action("reroute_menu")
-    if not session.scenario.scene.alternate_routes:
-        session.feedback("No alternate routes available.")
-        return None
     return "reroute"
 
 
 def _reroute_to(index: int) -> Handler:
+    """index: an alternate route (0, 1, ...); -1 = turn around."""
     def handler(session) -> None:
+        if index < 0:
+            session.record_action("reroute", alternate="turn_around")
+            session.perform_outcome("reroute:turnaround")
+            return
         session.record_action("reroute", alternate=index + 1)
         session.perform_outcome("reroute:{}".format(index + 1))
         session.feedback("Rerouting.")
@@ -250,9 +252,15 @@ ACTIONS: List[Action] = [
 # =============================================================================
 
 def _reroute_options(session) -> List[DialogOption]:
+    """The scene's alternate routes, or the next left / right turn; and always: turn around."""
     routes = session.scenario.scene.alternate_routes
-    return [DialogOption(route.label or "Alternate route {}".format(i + 1), _reroute_to(i))
-            for i, route in enumerate(routes)]
+    options = [DialogOption(route.label or "Alternate route {}".format(i + 1), _reroute_to(i))
+               for i, route in enumerate(routes)]
+    if not options:
+        options = [DialogOption("Detour via next left turn", _reroute_to(0)),
+                   DialogOption("Detour via next right turn", _reroute_to(1))]
+    options.append(DialogOption("Turn around", _reroute_to(-1)))
+    return options
 
 
 DIALOGS: Dict[str, Dialog] = {

@@ -47,7 +47,9 @@ Traffic rules in AV mode log `av_waiting` when a rule holds the car and
 `red light`, `traffic` (queued behind a waiting car), `vehicle ahead`, `pedestrian`,
 `space after intersection` (no room to clear the intersection, so the car waits at its line)
 `lane change` (waiting for a gap to get into the lane it needs for a turn, or to pass
-a parked car) or `obstacle` (braking for something solid right ahead that is not an actor).
+a parked car) `obstacle` (braking for something solid right ahead that is not a vehicle), `turning around`
+or `gap to turn around` (a reroute's three-point turn, waiting for traffic to pass).
+A reroute logs `reroute` with `alternate` = the route number, or `turn_around`.
 `cross traffic` means the AV is giving way to a vehicle whose path it would cross at
 about the same time and that has the right of way (or is already in the intersection,
 or is running its stop sign / red light); at an all-way stop also a car that stopped first
