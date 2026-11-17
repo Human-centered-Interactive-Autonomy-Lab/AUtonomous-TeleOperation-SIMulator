@@ -626,4 +626,150 @@ TODO / NEXT TIME
 [ ] Fix README: Python 3.7-3.10 note, use "python -m pip".
 [ ] Improve the "NOT CONNECTED TO CARLA" message to show the real reason.
 [ ] Fix any more bugs and errors.
+(Open items carry over to the TODO list of the 2026-11-16 entry below.)
+==========================================================================
+
+
+==========================================================================
+AUTOSIM WORK LOG - 2026-11-16
+Project: AUTOSIM (AUtonomous TeleOperation SIMulator)
+Repo: https://github.com/Human-centered-Interactive-Autonomy-Lab/AUtonomous-TeleOperation-SIMulator
+Local folder: C:\Carla\AUtonomous-TeleOperation-SIMulator
+Setup: Windows, Python 3.10.11, CARLA 0.9.15 (packaged)
+Pull requests: #20 to #30, all merged into main
+==========================================================================
+
+SUMMARY
+-------
+Goal today: make every scenario (especially heavy_traffic_scenario.csv)
+behave like real driving.
+- Realistic traffic: background cars keep moving, are never lost, give
+  the AV its turn at stop signs, and no longer brake-check each other.
+- Lanes: the AV can drive in the left lane, changes lanes only when safe,
+  never inside an intersection, and turns from the lane it is in.
+- Intersections: proper right of way (stop signs, 4-way stops, yield to
+  the right, green-light left turns, right on red); the AV keeps watching
+  while it crosses.
+- Pull Over: never into a parked car; drives on in the lane until there
+  is a free gap at the curb.
+- Parked cars that are part of the map (Town10) are now seen at all.
+- Sudden operator commands (e.g. Resume AV then Pull Over) are safe.
+- Reroute works in every scene (detour, pass the blockage, or turn around).
+- 48 automated tests (was 43), plus many new stand-in driving checks.
+NOTE: all of this was tested in Claude's stand-in simulator, NOT yet in
+CARLA. See the CARLA checklist at the end.
+
+
+--------------------------------------------------------------------------
+1. TRAFFIC, LANES, CURB, PASSENGERS  (#20)
+--------------------------------------------------------------------------
+- Pull Over stops before a parked car / obstacle, or pulls forward to a
+  free curb spot.
+- Passengers walking away get up the curb (no endless walking).
+- The AV can pass a stopped car in the left lane (after 5 s behind it),
+  with safe gap checks, and goes back to its lane after passing.
+- No lane changes in or near (25 m) an intersection.
+- Background cars that get stuck are nudged, and lost cars are replaced
+  out of view, so the traffic stays as set (no despawning).
+
+
+--------------------------------------------------------------------------
+2. SUDDEN OPERATOR COMMANDS  (#21)
+--------------------------------------------------------------------------
+- Resume AV then Pull Over at once: waits for a safe spot (not into a car).
+- Pull Over pressed twice: ignored. Pull Over during manual driving: ends
+  manual driving first.
+- Resume AV while the passenger is at the door: waits until they are clear.
+- Answers to scenario questions while I drive manually are recorded but
+  do not take the wheel away (events.csv: outcome_not_applied).
+
+
+--------------------------------------------------------------------------
+3. RIGHT OF WAY AT INTERSECTIONS  (#22, #23, #24, #27)
+--------------------------------------------------------------------------
+Problem: the AV went at a stop sign together with another car (almost hit
+a police car) and waited for cars that were not in its way.
+Now:
+- Stop sign: full stop (2 s), then go if clear; wait if a car with right
+  of way is coming. 4-way stop: first to stop goes first; same time ->
+  the car on the right goes first.
+- Through road (others have stop signs): keeps its speed.
+- No signs: yield to the right. Green light: yield to oncoming traffic
+  only when turning left. Right on red after a full stop when clear.
+- The AV predicts where each car can go through the intersection, so a
+  right turn does not wait for traffic that never crosses it.
+- It keeps checking while crossing and brakes if a car pulls out.
+- A car whose turn it is but that never goes: after 4 s the AV goes.
+- Background cars (CARLA Traffic Manager) did not take turns with the AV;
+  now they ease to a stop at their line while it is the AV's turn.
+- Turn signals for turns, lane changes and pulling over.
+Settings (autosim/settings.py): RIGHT_ON_RED, WAVE_THROUGH_SECONDS,
+  YIELD_GAP_SECONDS, YIELD_WATCH_METERS, NPC_YIELD_TO_AV,
+  NPC_YIELD_MAX_SECONDS.
+
+
+--------------------------------------------------------------------------
+4. PARKED CARS AND PULLING OVER  (#25, #26, #28, #29)
+--------------------------------------------------------------------------
+Problem: Pull Over drove into parked cars (several times).
+Causes and fixes:
+- Town10's parked cars are part of the map, not CARLA "actors", so
+  nothing could see them. Now they are read from the map at load
+  (console: "... N parked cars on this map"; should be > 0 in Town10).
+- Two front obstacle sensors stop the car for anything solid ahead
+  (not for other cars in traffic - that caused brake-checking, fixed #30).
+- The AV steered to the curb right away and stopped against the parked
+  cars. Now it drives in the middle of its lane, looks for a free gap
+  (8 m free behind it, not next to a parked car), and steers to the curb
+  only for the last 10 m. No gap: it drives on (asks after 300 m).
+- A parked car blocking the lane: passed in the left lane.
+- New trip from the curb near an intersection turned right over the
+  corner into a hedge: fixed (route starts from the lane the car is in).
+- No stopping within 10 m before / 6 m after an intersection.
+Settings: CURB_SPOT_ENTRY_METERS, CURB_APPROACH_METERS,
+  CURB_SEARCH_SPEED_MPH, CURB_SPOT_GIVE_UP_METERS,
+  CURB_CLEAR_BEFORE_INTERSECTION_METERS, CURB_CLEAR_AFTER_INTERSECTION_METERS.
+
+
+--------------------------------------------------------------------------
+5. LANES AT TURNS  (#28)
+--------------------------------------------------------------------------
+Problem: the AV left its lane before every turn.
+Now it stays in its lane and turns from it if that lane can make the turn;
+it only changes lanes (before the intersection) if it must, e.g. left
+lane before a right turn. No sideways jump after the intersection.
+
+
+--------------------------------------------------------------------------
+6. SMOOTH TRAFFIC AND REROUTE  (#30)
+--------------------------------------------------------------------------
+Brake-checking had two causes (both from today's changes): the new front
+sensors braked hard for cars ahead, and background cars were told to stop
+instantly at intersections. Fixed; background cars also keep 4 m (was
+2.5 m) to the car ahead (NPC_FOLLOW_DISTANCE_METERS).
+Reroute:
+- The menu always has options: the scene's detours (or next left / next
+  right turn) plus "Turn around". (Before: 7 of 9 scenes had none.)
+- Detour order: take the turn if the way is clear; else pass the blockage
+  in a free lane; else turn around (three-point turn, only when no
+  traffic is coming) and take the detour back.
+- One-way or too narrow road: asks for Manual Control.
+- events.csv: reroute with alternate = 1, 2 ... or turn_around.
+
+
+--------------------------------------------------------------------------
+TODO / NEXT TIME  (check in CARLA - none of today's work is CARLA-tested)
+--------------------------------------------------------------------------
+[ ] Console at start: "N parked cars on this map" > 0 in Town10.
+[ ] Pull Over beside parked cars: drives on, pulls into a free gap.
+[ ] 4-way stop with background cars: correct order, no near-misses.
+[ ] Right turn at a stop sign with traffic from the right: no waiting.
+[ ] Traffic flows smoothly (no brake-checking) in heavy_traffic.
+[ ] Reroute: police_blockage turns around; construction_closed passes
+    the closure; "next left turn" works in other scenes.
+[ ] Left lane: passes a stopped / parked car, back to the right lane.
+[ ] Open question: add light background traffic to the 7 scenes that
+    have none?
+[ ] From before: README Python note; better "NOT CONNECTED" message.
+[ ] Fix any more bugs and errors.
 ==========================================================================
