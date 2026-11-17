@@ -277,7 +277,7 @@ class CarlaSimulation(Simulation):
         self.target_speed_mph = target_speed_mph
 
         self._spawn_ego(scene)
-        self.route = _Route(self._plan_route(self.map.get_waypoint(self.ego.get_location()), scene.route))
+        self.route = _Route(self._plan_route(self._ego_waypoint(), scene.route))
         self._extend_route_past_junction()
         self.route_index = 0
         self.agent = self._BasicAgent(self.ego, target_speed=target_speed_mph * MPH_TO_KMH,
@@ -1371,8 +1371,9 @@ class CarlaSimulation(Simulation):
         """Is there room to stop at the curb here: no car, obstacle or person in the way,
         and not in (or right next to) an intersection?"""
         half = self.ego.bounding_box.extent.x
-        for junction in self._route_junctions():
-            if junction["entry_m"] - 3.0 < route_m + half and junction["exit_m"] + 3.0 > route_m - half:
+        for junction in self._route_junctions():     # not in, or too close to, an intersection
+            if junction["entry_m"] - settings.CURB_CLEAR_BEFORE_INTERSECTION_METERS < route_m + half and \
+                    junction["exit_m"] + settings.CURB_CLEAR_AFTER_INTERSECTION_METERS > route_m - half:
                 return False
         index = self.route.index_at(route_m)
         waypoint = self.route.waypoints[index]
@@ -1460,7 +1461,7 @@ class CarlaSimulation(Simulation):
         # A detour must not lead through what the car stopped for: try the requested
         # turn, then the other one, then straight on; refuse if all are blocked.
         preferred = "left" if alternate_index % 2 == 0 else "right"
-        start = self.map.get_waypoint(self.ego.get_location())
+        start = self._ego_waypoint()
         blocker = None
         for turn in (preferred, "right" if preferred == "left" else "left", ""):
             waypoints = self._plan_route(start, spec, turn_at_first_junction=turn)
@@ -1514,7 +1515,7 @@ class CarlaSimulation(Simulation):
 
     def _follow_new_route(self, length_m: float) -> None:
         """Leave the curb in AV mode and follow the road for ``length_m`` from here."""
-        start = self.map.get_waypoint(self.ego.get_location())
+        start = self._ego_waypoint()
         self.route = _Route(self._plan_route(start, RouteSpec({"length_m": length_m})), self.state.route_traveled_m)
         self._extend_route_past_junction()
         self.state.route_length_m = self.route.end_distance   # the session reads it this frame
@@ -1696,6 +1697,38 @@ class CarlaSimulation(Simulation):
         self.ego = ego
         self.spawned.append(ego)
         self.world.wait_for_tick()
+
+    def _ego_waypoint(self):
+        """The lane the car is in and facing along.  ``map.get_waypoint`` returns the
+        nearest lane centre, which at the edge of an intersection (e.g. stopped at the
+        curb near the corner) is often a turning lane through it -- a route planned from
+        there would make a turn the car never meant to, over the corner.  So the lane is
+        taken where the car is clearly on the road, a few metres back, and followed up to
+        the car, keeping its heading through the intersection."""
+        transform = self.ego.get_transform()
+        location, yaw = transform.location, transform.rotation.yaw
+
+        def facing(waypoint) -> float:
+            return abs((waypoint.transform.rotation.yaw - yaw + 180.0) % 360.0 - 180.0)
+
+        here = self.map.get_waypoint(location)
+        if here is not None and not here.is_junction and facing(here) < 45.0:
+            return here
+        forward = transform.get_forward_vector()
+        for back in (5.0, 10.0, 15.0, 20.0, 30.0):
+            behind = self.map.get_waypoint(carla.Location(location.x - forward.x * back, location.y - forward.y * back,
+                                                          location.z))
+            if behind is None or behind.is_junction or facing(behind) > 45.0:
+                continue
+            waypoint, left = behind, back
+            while left > 0.5:                       # forward to the car, the way it is heading
+                options = waypoint.next(min(2.0, left))
+                if not options:
+                    break
+                waypoint = min(options, key=facing)
+                left -= 2.0
+            return waypoint
+        return here
 
     def _plan_route(self, start, spec: RouteSpec, turn_at_first_junction: str = "") -> List[Any]:
         """Waypoints from ``start``: to the spec's destination, or following the road."""
@@ -1888,7 +1921,7 @@ class CarlaSimulation(Simulation):
         _, lateral, index = self.route.project(self.ego.get_location().x, self.ego.get_location().y)
         remaining = self.route.waypoints[index + 1:]
         if len(remaining) * ROUTE_STEP_METERS < minimum_length:
-            start = self.map.get_waypoint(self.ego.get_location())
+            start = self._ego_waypoint()
             remaining = self._plan_route(start, RouteSpec({"length_m": minimum_length}))[1:]
             self.lane_offset = self.lane_target = 0
             if remaining:
