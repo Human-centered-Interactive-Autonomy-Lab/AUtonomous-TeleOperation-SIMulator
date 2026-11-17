@@ -200,6 +200,9 @@ class CarlaSimulation(Simulation):
         self._front_hit: Tuple[float, float] = (0.0, 99.0)   # front obstacle sensors: (when, metres ahead)
         self._offset_changes: List[Tuple[float, int]] = []   # (route_m, lanes): where the plan's lane offset changes
         self._pass_from_lane: Optional[int] = None  # passing a parked car: the lane it is in
+        self._curb_offset: Optional[float] = None   # pulling over: how far right of the lane centre the curb stop is
+        self._agent_offset = 0.0                    # the offset BasicAgent follows now
+        self._pull_over_started_m = 0.0             # where the search for a curb spot began
         self._wanted_cars = 0
         self._wanted_walkers = 0
         self._next_traffic_check = 0.0
@@ -394,6 +397,15 @@ class CarlaSimulation(Simulation):
                     self.pull_over_end_m = self.state.route_traveled_m + 15.0
                     self._extend_route_to(self.pull_over_end_m + 10.0)
                 self._check_curb_spot()
+                if self._curb_offset is not None:
+                    # Along the lane's centre past parked cars; to the curb only into the free spot.
+                    near = self.pull_over_end_m - self.state.route_traveled_m < settings.CURB_APPROACH_METERS
+                    wanted = self._curb_offset if near else 0.0
+                    if wanted != self._agent_offset:
+                        self.agent.set_offset(wanted)
+                        self._agent_offset = wanted
+                        mph = settings.PULL_OVER_SPEED_MPH if near else settings.CURB_SEARCH_SPEED_MPH
+                        self.agent.set_target_speed(min(self.target_speed_mph, mph) * MPH_TO_KMH)
             if self.state.route_traveled_m >= self.pull_over_end_m or self.agent.done():
                 if stopped:
                     self.set_hazard_lights(True)
@@ -1347,6 +1359,7 @@ class CarlaSimulation(Simulation):
             for actor in self._actors_in_path(settings.RESUME_CLEARS_OBSTACLES_WITHIN_METERS, walkers=False):
                 self.ignored_obstacles.add(actor.id)
         self.agent.set_offset(0.0)
+        self._curb_offset, self._agent_offset = None, 0.0
         self.agent.set_target_speed(self.target_speed_mph * MPH_TO_KMH)
         if self.mode in (DrivingMode.MANUAL, DrivingMode.PULLED_OVER, DrivingMode.ROUTE_COMPLETE,
                          DrivingMode.EMERGENCY_STOP):
@@ -1384,6 +1397,7 @@ class CarlaSimulation(Simulation):
             self._replan_from_here()                # e.g. after an E-STOP: continue from where the car is
         traveled, half_length = self.state.route_traveled_m, self.ego.bounding_box.extent.x
         self.pull_over_end_m = traveled + settings.PULL_OVER_DISTANCE_METERS
+        self._pull_over_started_m = traveled
         self.curb_after_m = None
         # Never stop in (or drift to the curb inside) an intersection: if one lies in
         # the stretch ahead, or the car is in one, drive through it normally first.
@@ -1415,6 +1429,7 @@ class CarlaSimulation(Simulation):
         self.curb_after_m = None          # only called past the last intersection
         self._steer_to_curb()
         self.pull_over_end_m = self.route.end_distance
+        self._pull_over_started_m = self.state.route_traveled_m
         self.mode = DrivingMode.PULLING_OVER
 
     def _extend_route_past_junction(self) -> None:
@@ -1459,6 +1474,7 @@ class CarlaSimulation(Simulation):
         waypoint = self.route.waypoints[min(self.route_index, len(self.route.waypoints) - 1)]
         _, lanes_to_right = _rightmost_lane(waypoint)
         right_band = 1.6 if lane_only else (lanes_to_right - self.lane_offset + 1) * waypoint.lane_width + 1.0
+        ego_lateral = self.lane_offset * waypoint.lane_width     # measured from our lane's centre line
         half = self.ego.bounding_box.extent.x
         candidates = [a for a in self.spawned if a.id in self.scene_actor_ids and not a.type_id.startswith("walker.")]
         for vehicle in self.world.get_actors().filter("vehicle.*"):
@@ -1519,10 +1535,19 @@ class CarlaSimulation(Simulation):
             print("[carla] Curb spot taken; pulling forward {:.0f} m to a free one.".format(candidate - old))
             self.pull_over_end_m = candidate
         elif obstacle is not None and candidate > limit:
-            print("[carla] No free curb spot before the obstacle ahead; stopping and asking the operator.")
-            self.soft_stop("No free spot to pull over ahead")
+            # Something standing in our lane before any free spot: stop in the lane short of it.
+            print("[carla] No free curb spot before the obstacle in the lane ahead; stopping and asking the operator.")
+            self.pull_over_end_m = max(self.state.route_traveled_m, obstacle[0])
+            self._curb_offset = None
+            self.soft_stop("No free spot to pull over before the obstacle ahead")
+        elif candidate - self._pull_over_started_m > settings.CURB_SPOT_GIVE_UP_METERS:
+            print("[carla] No free curb spot within {:.0f} m; asking the operator.".format(settings.CURB_SPOT_GIVE_UP_METERS))
+            self._curb_offset = None
+            self.soft_stop("No free spot to pull over within {:.0f} m".format(settings.CURB_SPOT_GIVE_UP_METERS))
         else:
-            self.pull_over_end_m = candidate          # look again from there
+            if old == self.pull_over_end_m:
+                print("[carla] Curb taken (parked cars); driving on in the lane to look for a free spot.")
+            self.pull_over_end_m = candidate          # keep driving in the lane; look again from there
 
     def _curb_spot_free(self, route_m: float) -> bool:
         """Is there room to stop at the curb here: no car, obstacle or person in the way,
@@ -1538,7 +1563,7 @@ class CarlaSimulation(Simulation):
         forward, right = lane.transform.get_forward_vector(), lane.transform.get_right_vector()
         shift = route_m - self.route.cumulative[index]            # exactly at route_m, not the nearest point
         center = lane.transform.location + carla.Location(forward.x * shift, forward.y * shift, 0.0)
-        edge = lane.lane_width / 2.0 + 0.5
+        edge = lane.lane_width / 2.0 + 2.0     # also cars just beside the lane (we would be double-parked)
         beside = lane.get_right_lane()
         if beside is not None and beside.lane_type in (carla.LaneType.Shoulder, carla.LaneType.Parking):
             edge += beside.lane_width
@@ -1557,7 +1582,8 @@ class CarlaSimulation(Simulation):
             side = offset.x * right.x + offset.y * right.y
             box = getattr(actor, "bounding_box", None)
             reach = half + (box.extent.x if box is not None else 0.5) + settings.CURB_SPOT_MARGIN_METERS
-            if -reach < along < reach and -0.5 < side < edge:
+            room_behind = reach + settings.CURB_SPOT_ENTRY_METERS       # to drive into the spot
+            if -room_behind < along < reach and -0.5 < side < edge:
                 return False
         return True
 
@@ -1570,6 +1596,7 @@ class CarlaSimulation(Simulation):
         self._overtaking = None
         self._curb_pending = True
         self.agent.set_offset(0.0)
+        self._curb_offset, self._agent_offset = None, 0.0
         self.agent.set_target_speed(min(self.target_speed_mph, settings.INTERSECTION_APPROACH_SPEED_MPH) * MPH_TO_KMH)
         self._update_lane()
         self._reach_curb_lane()
@@ -1585,7 +1612,7 @@ class CarlaSimulation(Simulation):
         right = rightmost.get_right_lane()
         if right is not None and right.lane_type in (carla.LaneType.Shoulder, carla.LaneType.Parking):
             offset += right.lane_width * 0.6
-        self.agent.set_offset(max(0.0, offset))
+        self._curb_offset = max(0.0, offset)     # steered to only for the last metres before a free spot
         self.agent.set_target_speed(min(self.target_speed_mph, settings.PULL_OVER_SPEED_MPH) * MPH_TO_KMH)
 
     def change_lane(self, direction: str) -> bool:
@@ -1681,6 +1708,7 @@ class CarlaSimulation(Simulation):
         self.route_finishing = False
         self.curb_after_m = None
         self.agent.set_offset(0.0)
+        self._curb_offset, self._agent_offset = None, 0.0
         self.agent.set_target_speed(self.target_speed_mph * MPH_TO_KMH)
         self._follow_route_lane()
         self.set_hazard_lights(False)
