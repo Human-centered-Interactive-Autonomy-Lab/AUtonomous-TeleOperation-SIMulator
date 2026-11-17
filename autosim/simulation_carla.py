@@ -196,6 +196,8 @@ class CarlaSimulation(Simulation):
         self._npc_cars: List[Any] = []              # background cars (Traffic Manager autopilot)
         self._npc_walkers: List[Tuple[Any, Any]] = []   # background pedestrians: (walker, its AI controller)
         self._npc_watch: Dict[int, Dict[str, Any]] = {}  # actor id -> where/when it last moved, nudges tried
+        self._npc_held: Dict[int, Tuple[Any, str, float]] = {}  # background cars waiting for the AV's turn
+        self._npc_held_enough: set = set()          # held the longest allowed at this intersection
         self._wanted_cars = 0
         self._wanted_walkers = 0
         self._next_traffic_check = 0.0
@@ -263,6 +265,7 @@ class CarlaSimulation(Simulation):
         self.walker_targets = {}
         self.walker_progress = {}
         self._npc_cars, self._npc_walkers, self._npc_watch = [], [], {}
+        self._npc_held = {}
         self.scene_actor_ids = set()
         self.actor_names = {}
         self._yielding = False
@@ -322,6 +325,7 @@ class CarlaSimulation(Simulation):
             self.client.apply_batch_sync(commands, False)
         self.spawned = []
         self._npc_cars, self._npc_walkers, self._npc_watch = [], [], {}
+        self._npc_held = {}
         self.dropoff = None
         self.pickup = None
         self.ego = None
@@ -351,6 +355,8 @@ class CarlaSimulation(Simulation):
         control = self._control_for_mode()
         self.ego.apply_control(control)
         self._update_turn_signal()
+        if self._tick_count % 2 == 0:
+            self._referee_intersection()
         return self.state
 
     def camera_frames(self) -> Dict[str, Tuple[float, Any]]:
@@ -1043,6 +1049,108 @@ class CarlaSimulation(Simulation):
         if ours == "priority":
             return turning_left and side == "oncoming"   # both on the through road
         return side == "right" or (turning_left and side == "oncoming")   # no signs: yield to the right
+
+    # --- background traffic gives the AV its turn ----------------------------
+
+    def _referee_intersection(self) -> None:
+        """Make CARLA's background cars respect the AV's right of way.
+
+        The Traffic Manager's cars take turns at stop signs only among themselves:
+        they stop, then pull out without regard for the AV.  So while it is the AV's
+        turn -- the AV has decided to go (its stop made, nobody to give way to), or
+        it is in the intersection (in AV mode or driven by the operator) -- every
+        background car that could still stop before the intersection and whose way
+        would cross the AV's is told to wait (Traffic Manager target speed 0), and is
+        let go as soon as the AV is through.  Cars already in the intersection, or
+        too close to stop, are not held: the AV gives way to those itself."""
+        if self._traffic_manager is None or not settings.NPC_YIELD_TO_AV or self.route is None:
+            self._release_npcs()
+            return
+        front = self.state.route_traveled_m + self.ego.bounding_box.extent.x
+        junction = next((j for j in self._route_junctions()
+                         if j["entry_m"] <= front + 25.0 and front < j["exit_m"] + 1.0), None)
+        if junction is None:
+            self._release_npcs()
+            return
+        to_entry, speed = junction["entry_m"] - front, self.state.speed_mps
+        inside = to_entry <= 0.0
+        if self.mode in (DrivingMode.AUTONOMOUS, DrivingMode.PULLING_OVER):
+            our_turn = inside or (not self.state.waiting_for and to_entry < max(6.0, speed * 2.5) and
+                                  (junction["stop_m"] is None or junction["stop_done"] or junction["signalized"]))
+        elif self.mode == DrivingMode.MANUAL:
+            our_turn = inside or (speed > 1.0 and to_entry < max(5.0, speed * 2.0))
+        else:
+            our_turn = False
+        if not our_turn:
+            self._release_npcs()
+            return
+        path = self._our_path(junction, front)
+        keep, now = set(), time.monotonic()
+        half = self.ego.bounding_box.extent
+        for car in self._npc_cars:
+            try:
+                if not car.is_alive:
+                    continue
+                velocity = car.get_velocity()
+                paths = self._vehicle_paths(car, junction)
+            except RuntimeError:
+                continue
+            car_speed = math.hypot(velocity.x, velocity.y)
+            held = car.id in self._npc_held
+            if car.id in self._npc_held_enough:
+                continue
+            for other in paths:
+                if other["inside"] or other["from"] == "same":
+                    continue
+                meet = _first_conflict(path, other["points"], half.y + car.bounding_box.extent.y + 0.5)
+                if meet is None or meet[1] + 2.0 * half.x < 0.0:
+                    continue                          # never meets us / we are past that point already
+                can_stop = car_speed * car_speed / (2.0 * 3.5) + 1.5 < other["entry_m"]
+                if held or can_stop:
+                    keep.add(car.id)
+                    if not held:
+                        self._hold_npc(car, now)
+                    break
+        self._release_npcs(keep, now)
+
+    def _hold_npc(self, car, now: float) -> None:
+        method = "speed"
+        try:
+            self._traffic_manager.set_desired_speed(car, 0.0)
+        except (AttributeError, RuntimeError):
+            method = "brake"                         # older Traffic Manager: take the wheel briefly
+            try:
+                car.set_autopilot(False, self._traffic_manager.get_port())
+                car.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+            except RuntimeError:
+                return
+        self._npc_held[car.id] = (car, method, now)
+
+    def _release_npcs(self, keep=(), now: Optional[float] = None) -> None:
+        """Let the held background cars go (all but ``keep``; never held for too long)."""
+        now = time.monotonic() if now is None else now
+        if not keep:
+            self._npc_held_enough = set()               # the AV's turn is over
+        for car_id, (car, method, since) in list(self._npc_held.items()):
+            if car_id in keep and now - since >= settings.NPC_YIELD_MAX_SECONDS:
+                self._npc_held_enough.add(car_id)
+            elif car_id in keep:
+                if method == "brake":
+                    try:
+                        car.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+                    except RuntimeError:
+                        pass
+                continue
+            del self._npc_held[car_id]
+            try:
+                if not car.is_alive:
+                    continue
+                if method == "speed":
+                    self._traffic_manager.vehicle_percentage_speed_difference(car, settings.NPC_SPEED_BELOW_LIMIT_PERCENT)
+                else:
+                    car.set_autopilot(True, self._traffic_manager.get_port())
+            except (AttributeError, RuntimeError):
+                pass
 
     def _update_turn_signal(self) -> None:
         """Signal like a driver must: right while pulling over, the side of a lane
@@ -2349,8 +2457,8 @@ class CarlaSimulation(Simulation):
             if watch["nudged_until"] is not None and now >= watch["nudged_until"]:
                 manager.ignore_vehicles_percentage(car, 0)
                 watch["nudged_until"] = None
-            if here.distance(watch["spot"]) > 1.0:
-                watch.update(spot=here, since=now, tries=0)
+            if here.distance(watch["spot"]) > 1.0 or car.id in self._npc_held:
+                watch.update(spot=here, since=now, tries=0)    # (a car waiting for the AV is not stuck)
                 continue
             if now - watch["since"] < settings.NPC_STUCK_SECONDS:
                 continue
