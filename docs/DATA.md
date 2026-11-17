@@ -47,8 +47,10 @@ Traffic rules in AV mode log `av_waiting` when a rule holds the car and
 `red light`, `traffic` (queued behind a waiting car), `vehicle ahead`, `pedestrian`,
 `space after intersection` (no room to clear the intersection, so the car waits at its line)
 or `lane change` (waiting to get back into the lane it needs for a turn).
-`cross traffic` also covers giving way at an all-way stop to a car that stopped first
-(or at the same time, on the right) and, at a green light, to oncoming traffic when turning left.
+`cross traffic` means the AV is giving way to a vehicle whose path it would cross at
+about the same time and that has the right of way (or is already in the intersection,
+or is running its stop sign / red light); at an all-way stop also a car that stopped first
+(or at the same time, on the right). Turning right on red (`RIGHT_ON_RED`) follows a full stop.
 
 ## scenarios.csv
 
